@@ -1,0 +1,53 @@
+rtabmap:
+  ros__parameters:
+
+    # ─── Frame config ───
+    frame_id: "base_link"
+    odom_frame_id: "rtabmap/odom"
+    map_frame_id: "map"
+
+    # ─── LiDAR input only ───
+    subscribe_scan:        true
+    subscribe_scan_cloud:  false
+    subscribe_depth:       false
+    subscribe_rgb:         false
+    subscribe_stereo:      false
+    subscribe_rgbd:        false
+    rgbd_cameras:          0
+    scan_topic:            "/scan"
+    odom_topic:            "/rtabmap/odom"
+    subscribe_odom_info:   true
+
+    # ─── Sync ───
+    approx_sync:           true
+    sync_queue_size:       10
+
+    # ─── Odometry ───
+    icp_odometry:          true
+    visual_odometry:       false
+
+    # ─── FORCE localization (no new mapping!) ───
+    Mem:
+      IncrementalMemory:   false   # do NOT add new scans to WM
+      InitWMWithAllNodes:  true    # load all past nodes in WM from DB
+    Reg:
+      Strategy:            1       # ICP
+
+    # ─── Keep the saved map static ───
+    map_always_update:     false
+    map_empty_ray_tracing: true
+
+    # ─── 2D occupancy grid params ───
+    Grid:
+      Sensor:                    0  # LaserScan
+      FromDepth:                 false
+      RangeMin:                  0.12
+      RangeMax:                  10.0
+      CellSize:                  0.05
+      MapNegativeScansEmptyOverRayTrace: true
+
+    # ─── Disable visuals ───
+    Rtabmap:
+      ImagesAlreadySynchronized: true
+    Vis:
+      MaxFeatures:               0

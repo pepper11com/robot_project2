@@ -1,0 +1,66 @@
+# RTAB-Map: Lidar + Stereo Camera SLAM Configuration
+rtabmap:
+  ros__parameters:
+    # ─── Core Frame Configuration ───
+    frame_id: "base_link"
+    map_frame_id: "map"
+    odom_frame_id: "rtabmap_odom"
+    publish_tf: true
+    tf_delay: 0.1                     # Increased delay
+    tf_tolerance: 1.0                 # Much more tolerance
+    odom_sensor_sync: false
+
+    # ─── Input Data Subscription ───
+    subscribe_depth: false
+    subscribe_rgb: false
+    subscribe_stereo: true
+    subscribe_scan: true
+    subscribe_scan_cloud: false
+    subscribe_odom_info: false
+
+    # --- Topic Names ---
+    odom_topic: "/rtabmap_odom_raw_msgs"
+
+    # ─── Data Synchronization ───
+    approx_sync: true
+    sync_queue_size: 50               # Reduced for better performance
+    approx_sync_max_interval: 1.0     # Very generous timing window
+
+    # ─── General SLAM Parameters ───
+    Rtabmap/DetectionRate: "1.0"      # Back to 1Hz
+    Rtabmap/TimeThr: "700"
+    Mem/IncrementalMemory: "true"
+    Mem/STMSize: "30"
+    Mem/UseOdomFeatures: "false"
+
+    # ─── CRITICAL: Enable occupancy grid creation ───
+    RGBD/CreateOccupancyGrid: "true"
+
+    # ─── Loop Closure Strategy ───
+    RGBD/LoopClosureEnabled: "true"
+    RGBD/ProximityBySpace: "true"
+    RGBD/ProximityPathMaxNeighbors: "10"
+
+    # *** Disable visual features completely for now ***
+    Vis/LoopClosureEnabled: "false"
+    Vis/MaxFeatures: "0"
+
+    # --- Lidar-primary registration ---
+    Reg/Strategy: "1"
+    Reg/Force3DoF: "true"
+
+    # ─── 2D Occupancy Grid (from Lidar) ───
+    Grid/FromDepth: "false"
+    Grid/RayTracing: "true"
+    Grid/CellSize: "0.05"
+    Grid/RangeMin: "0.12"
+    Grid/RangeMax: "10.0"
+    Grid/Sensor: "0"
+    Grid/3D: "false"
+
+    # ─── Graph Optimization ───
+    Optimizer/Strategy: "1"
+    Optimizer/Iterations: "10"
+    Optimizer/Slam2D: "true"
+
+    Rtabmap/StatisticLogged: "true"

@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import TransformBroadcaster
+
+class OdomTF(Node):
+    def __init__(self):
+        super().__init__('rf2o_tf_broadcaster')
+        self.br = TransformBroadcaster(self)
+        self.create_subscription(
+            Odometry, '/odom_rf2o', self.cb, 10)
+        self.get_logger().info('TF Broadcaster started - listening to /odom_rf2o')
+
+    def cb(self, msg: Odometry):
+        tf = TransformStamped()
+        tf.header = msg.header            # stamp + parent (= "odom")
+        tf.child_frame_id = msg.child_frame_id or 'base_link'
+        tf.transform.translation.x = msg.pose.pose.position.x
+        tf.transform.translation.y = msg.pose.pose.position.y
+        tf.transform.translation.z = 0.0
+        tf.transform.rotation   = msg.pose.pose.orientation
+        self.br.sendTransform(tf)
+
+def main():
+    rclpy.init()
+    rclpy.spin(OdomTF())
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

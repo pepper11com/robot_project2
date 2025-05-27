@@ -1,0 +1,426 @@
+# Custom Nav2 Parameters for your 4-wheel robot with SLLidar C1 and ICP Odometry
+# BASED ON THE NAV2 DEFAULT YOU PROVIDED
+
+amcl:
+  ros__parameters:
+    alpha1: 0.1                   ### MODIFIED ### - Start with slightly lower noise for good ICP odom
+    alpha2: 0.1                   ### MODIFIED ###
+    alpha3: 0.1                   ### MODIFIED ###
+    alpha4: 0.1                   ### MODIFIED ###
+    alpha5: 0.1                   ### MODIFIED ### (though for diff drive, this is less critical)
+    base_frame_id: "base_link"    ### MODIFIED ### - YOUR ROBOT'S BASE FRAME
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: "map"
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 10.0         ### MODIFIED ### - YOUR LIDAR'S MAX RANGE (SLLidar C1 often ~10-16m, 10 is safe)
+    laser_min_range: 0.12         ### MODIFIED ### - YOUR LIDAR'S MIN RANGE
+    laser_model_type: "likelihood_field"
+    max_beams: 180                ### MODIFIED ### - For a 360 lidar at 10Hz, this is ~2 deg resolution. Default 60 is fine too.
+    max_particles: 3000           ### MODIFIED ### - Slightly increased from default 2000
+    min_particles: 500
+    odom_frame_id: "odom"         # This is correct as your ICP odom will publish to "odom"
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    robot_model_type: "nav2_amcl::DifferentialMotionModel" # Correct for tank/diff-drive
+    save_pose_rate: 0.5
+    sigma_hit: 0.2
+    tf_broadcast: true            # AMCL will publish map -> odom
+    transform_tolerance: 0.5      ### MODIFIED ### - Increased from Nav2 default 1.0 to 0.5, can go lower if TF is good
+    update_min_a: 0.2             # Radians (~11.5 degrees)
+    update_min_d: 0.1             # Meters
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+    scan_topic: "scan"            # This should match your lidar topic
+
+bt_navigator:
+  ros__parameters:
+    global_frame: map
+    robot_base_frame: base_link   ### MODIFIED ### - YOUR ROBOT'S BASE FRAME
+    odom_topic: /odom             # Correct, matches ICP output
+    bt_loop_duration: 10          # Hz
+    default_server_timeout: 20    # ms
+    wait_for_service_timeout: 1000 # ms
+    action_server_result_timeout: 900.0 # seconds
+    navigators: ["navigate_to_pose", "navigate_through_poses"] # Default, fine
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+    # Default BT XMLs are usually fine for starting.
+
+    error_code_names:
+      - compute_path_error_code
+      - follow_path_error_code
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 10.0    ### MODIFIED ### - Your manual controller frequency
+    # costmap_update_timeout: 0.30 # Default, likely fine
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5 # Irrelevant for non-holonomic DiffDrive controller
+    min_theta_velocity_threshold: 0.01 ### MODIFIED ### - Based on your min_active_angular_speed
+    failure_tolerance: 5.0        ### MODIFIED ### - Increased from 0.3s, give more time
+    progress_checker_plugins: ["progress_checker"] # Using the name defined below
+    goal_checker_plugins: ["goal_checker"]         # Using the name defined below
+    controller_plugins: ["FollowPath"]             # Name of the controller instance below
+    use_realtime_priority: false
+
+    progress_checker: # Name matches progress_checker_plugin
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.3 # Default 0.5 is fine, or lower if robot moves slowly
+      movement_time_allowance: 10.0
+
+    goal_checker: # Name matches goal_checker_plugin
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.04       ### MODIFIED ### - Your waypoint_position_tolerance
+      yaw_goal_tolerance: 0.05      ### MODIFIED ### - Your final_orientation_tolerance
+
+    FollowPath: # Name matches controller_plugins entry
+      plugin: "dwb_core::DWBLocalPlanner" ### MODIFIED ### - Switched from MPPI to DWB for simplicity to start
+      # DWB Parameters
+      # Debugging (keep false/commented unless needed)
+      # publish_trajectories: false
+      # publish_local_plan: false
+      # publish_cost_grid_pc: false
+      
+
+      # Tolerances (should ideally match goal_checker for the final check)
+      xy_goal_tolerance: 0.04
+      yaw_goal_tolerance: 0.05
+
+      # Kinematic Parameters for DWB
+      min_vel_x: 0.0                # Robot can stop. DWB might command small reverse if useful.
+      max_vel_x: 0.012              ### YOUR VALUE ### max_linear_speed
+      min_vel_y: 0.0                # Non-holonomic
+      max_vel_y: 0.0                # Non-holonomic
+      max_vel_theta: 0.2            ### YOUR VALUE ### max_angular_speed_align
+      min_vel_theta: -0.2           # Allow turning both ways
+
+      # Acceleration limits (ADJUST THESE BASED ON YOUR ROBOT'S CAPABILITIES)
+      acc_lim_x: 0.25
+      acc_lim_y: 0.0                # Non-holonomic
+      acc_lim_theta: 0.5
+      decel_lim_x: 0.25             # Should be positive
+      decel_lim_theta: 0.5          # Should be positive
+      # min_speed_xy: 0.0           # Default is fine
+      # max_speed_xy: 0.012         # Default, capped by max_vel_x
+      # min_speed_theta: 0.0        # Default is fine
+
+      # Trajectory Generation
+      sim_time: 1.5                 # How far DWB simulates (seconds)
+      sim_granularity: 0.025        # Time step for simulation
+      vx_samples: 10                # Number of linear velocity samples
+      vy_samples: 1                 # Only 1 for non-holonomic
+      vtheta_samples: 20            # Number of angular velocity samples
+      # angular_sim_granularity: 0.025 # Radian step for angular simulation (default)
+
+      # Critics configuration - THIS WAS MISSING
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      
+      # Critic Parameters (DWB uses a set of default critics if not specified)
+      BaseObstacle:
+        scale: 0.02             # Weight for avoiding obstacles
+      PathAlign:
+        scale: 32.0             # Weight for aligning with path
+      PathDist:
+        scale: 32.0             # Weight for staying on the global path
+      GoalAlign:
+        scale: 24.0             # Weight for aligning to goal
+      GoalDist:
+        scale: 24.0             # Weight for getting closer to the goal
+      RotateToGoal:
+        scale: 32.0             # Weight for rotating to goal
+        slowing_factor: 5.0
+        lookahead_time: -1.0
+      Oscillation:
+        scale: 1.0              # Weight for oscillation detection
+
+local_costmap:
+  local_costmap: # This sub-namespace is important
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: "odom"        ### MODIFIED ### - Local costmap in odom frame
+      robot_base_frame: "base_link" ### MODIFIED ### - Your robot's base frame
+      rolling_window: true
+      width: 3                    # Meters
+      height: 3                   # Meters
+      resolution: 0.05            # Meters/pixel
+      # robot_radius: 0.22        # Remove if using footprint
+      footprint: "[[0.2, 0.15], [0.2, -0.15], [-0.2, -0.15], [-0.2, 0.15]]" ### YOUR FOOTPRINT ### (0.4m long, 0.3m wide, centered)
+      plugins: ["obstacle_layer", "inflation_layer"] ### MODIFIED ### - Removed voxel_layer, static_layer for typical 2D Lidar local costmap
+      
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.25    ### YOUR VALUE ### (e.g., robot_half_width + clearance = 0.15 + 0.10)
+
+      obstacle_layer:             ### ADDED/MODIFIED from voxel_layer to obstacle_layer for 2D ###
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan   # Name of the observation source defined below
+        scan:                     # Configuration for the 'scan' observation source
+          topic: "/scan"
+          sensor_frame: "lidar_link" ### MODIFIED ### - Frame of your lidar
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0   # How far to clear free space based on sensor readings
+          obstacle_max_range: 2.5   # How far to insert obstacles from sensor readings
+          # raytrace_min_range: 0.0 # Default
+          # obstacle_min_range: 0.0 # Default
+
+      # static_layer: # Not typically used in local_costmap when rolling_window is true
+      #   plugin: "nav2_costmap_2d::StaticLayer"
+      #   map_subscribe_transient_local: True # This means it would try to use the global map
+
+      always_send_full_costmap: True
+
+global_costmap:
+  global_costmap: # This sub-namespace is important
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: "map"
+      robot_base_frame: "base_link" ### MODIFIED ###
+      # robot_radius: 0.22        # Remove if using footprint
+      footprint: "[[0.2, 0.15], [0.2, -0.15], [-0.2, -0.15], [-0.2, 0.15]]" ### YOUR FOOTPRINT ###
+      resolution: 0.05            # Should match your static map's resolution
+      track_unknown_space: true
+      transform_tolerance: 0.5    ### MODIFIED ### - From default 1.0
+
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"] # Order can matter
+
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: True
+        map_subscribe_transient_local: True # Important for using the map from map_server
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan   # Name of the observation source
+        scan:                     # Configuration for the 'scan' observation source
+          topic: "/scan"
+          sensor_frame: "lidar_link" ### MODIFIED ###
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          obstacle_max_range: 2.5
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.25    ### YOUR VALUE ###
+
+      always_send_full_costmap: True
+
+map_saver: # This is for the map_saver_server node, parameters are for map_saver_cli mostly
+  ros__parameters:
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25     # Default from your map_saver_cli output
+    occupied_thresh_default: 0.65 # Default from your map_saver_cli output
+    map_subscribe_transient_local: True
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 1.0 # MODIFIED from 20.0, global planning isn't needed that fast
+    planner_plugins: ["GridBased"]
+    # costmap_update_timeout: 1.0 # Default, probably fine
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner" # Or nav2_smac_planner::SmacPlanner2D
+      tolerance: 0.1                ### MODIFIED ### - How close to goal for planner (meters)
+      use_astar: true               ### MODIFIED ###
+      allow_unknown: true
+
+smoother_server: # Optional, can comment out if not used
+  ros__parameters:
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      # tolerance: 1.0e-10 # Default
+      # max_its: 1000      # Default
+      # do_refinement: True # Default
+
+behavior_server:
+  ros__parameters:
+    # local_costmap_topic: local_costmap/costmap_raw # Default
+    # global_costmap_topic: global_costmap/costmap_raw # Default
+    # local_footprint_topic: local_costmap/published_footprint # Default
+    # global_footprint_topic: global_costmap/published_footprint # Default
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "wait"] ### MODIFIED ### - Simplified list
+    spin:
+      plugin: "nav2_behaviors::Spin"
+      # time_allowance: 10.0  # Default
+      # general behavior parameters below will apply unless overridden here
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+      # backup_dist: -0.15 # Default (negative for backward)
+      # backup_speed: 0.025 # Default
+      # time_allowance: 10.0 # Default
+    wait:
+      plugin: "nav2_behaviors::Wait"
+      # duration: 1.0 # Default
+      # time_allowance: 10.0 # Default
+    # Parameters common to many behaviors
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_link ### MODIFIED ###
+    transform_tolerance: 0.5    ### MODIFIED ###
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.2     ### YOUR VALUE ### max_angular_speed_align
+    min_rotational_vel: 0.03    ### YOUR VALUE ### min_active_angular_speed
+    rotational_acc_lim: 0.5     ### YOUR VALUE ### (estimate)
+
+waypoint_follower:
+  ros__parameters:
+    loop_rate: 20
+    stop_on_failure: false
+    # action_server_result_timeout: 900.0 # Default
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 0 ### MODIFIED ### - No pause unless you want it
+
+# Keep velocity_smoother, collision_monitor, docking_server, loopback_simulator commented out
+# or removed unless you specifically need them and have configured them.
+# They add complexity.
+
+# velocity_smoother:
+#   ros__parameters:
+#     ...
+
+# collision_monitor:
+#   ros__parameters:
+#     base_frame_id: "base_link" ### MODIFIED ###
+#     ...
+
+# docking_server:
+#   ros__parameters:
+#     ...
+
+# loopback_simulator: # Definitely remove this for a real robot
+#   ros__parameters:
+#     ...
+
+
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 20.0
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.5, 0.0, 2.0]
+    min_velocity: [-0.5, 0.0, -2.0]
+    max_accel: [2.5, 0.0, 3.2]
+    max_decel: [-2.5, 0.0, -3.2]
+    odom_topic: "odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+collision_monitor:
+  ros__parameters:
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "cmd_vel"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.2
+    source_timeout: 1.0
+    base_shift_correction: True
+    stop_pub_timeout: 2.0
+    # Polygons represent zone around the robot for "stop", "slowdown" and "limit" action types,
+    # and robot footprint for "approach" action type.
+    polygons: ["FootprintApproach"]
+    FootprintApproach:
+      type: "polygon"
+      action_type: "approach"
+      footprint_topic: "/local_costmap/published_footprint"
+      time_before_collision: 1.2
+      simulation_time_step: 0.1
+      min_points: 6
+      visualize: False
+      enabled: True
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: "scan"
+      min_height: 0.15
+      max_height: 2.0
+      enabled: True
+
+docking_server:
+  ros__parameters:
+    controller_frequency: 50.0
+    initial_perception_timeout: 5.0
+    wait_charge_timeout: 5.0
+    dock_approach_timeout: 30.0
+    undock_linear_tolerance: 0.05
+    undock_angular_tolerance: 0.1
+    max_retries: 3
+    base_frame: "base_link"
+    fixed_frame: "odom"
+    dock_backwards: false
+    dock_prestaging_tolerance: 0.5
+
+    # Types of docks
+    dock_plugins: ['simple_charging_dock']
+    simple_charging_dock:
+      plugin: 'opennav_docking::SimpleChargingDock'
+      docking_threshold: 0.05
+      staging_x_offset: -0.7
+      use_external_detection_pose: true
+      use_battery_status: false # true
+      use_stall_detection: false # true
+
+      external_detection_timeout: 1.0
+      external_detection_translation_x: -0.18
+      external_detection_translation_y: 0.0
+      external_detection_rotation_roll: -1.57
+      external_detection_rotation_pitch: -1.57
+      external_detection_rotation_yaw: 0.0
+      filter_coef: 0.1
+
+    # Dock instances
+    # The following example illustrates configuring dock instances.
+    # docks: ['home_dock']  # Input your docks here
+    # home_dock:
+    #   type: 'simple_charging_dock'
+    #   frame: map
+    #   pose: [0.0, 0.0, 0.0]
+
+    controller:
+      k_phi: 3.0
+      k_delta: 2.0
+      v_linear_min: 0.15
+      v_linear_max: 0.15
+      use_collision_detection: true
+      costmap_topic: "local_costmap/costmap_raw"
+      footprint_topic: "local_costmap/published_footprint"
+      transform_tolerance: 0.1
+      projection_time: 5.0
+      simulation_step: 0.1
+      dock_collision_threshold: 0.3
+
+loopback_simulator:
+  ros__parameters:
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    map_frame_id: "map"
+    scan_frame_id: "base_scan"  # tb4_loopback_simulator.launch.py remaps to 'rplidar_link'
+    update_duration: 0.02

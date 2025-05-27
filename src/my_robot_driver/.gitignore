@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test outputs
+test_results/
+test_output/
+
+# Development scripts
+scripts/test_*.py
+scripts/debug_*.py
+
+# Temporary files
+*.tmp
+*.bak

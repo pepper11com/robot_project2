@@ -1,0 +1,18 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ROS bag files
+*.bag
+*.db3
+
+# Config backups
+config/*.backup
+config/*~
+
+# Log files
+*.log
+
+# Temporary launch files
+launch/*.tmp

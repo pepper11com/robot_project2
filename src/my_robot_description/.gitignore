@@ -1,0 +1,16 @@
+# Mesh backup files
+meshes/*.backup
+meshes/*~
+
+# CAD files (if large)
+*.step
+*.stp
+*.iges
+*.igs
+
+# Temporary URDF/SDF files
+*.tmp
+*.bak
+
+# Generated files
+urdf/*.generated

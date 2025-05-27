@@ -1,0 +1,151 @@
+# RTAB-Map configuration for Stereo (D405) + Lidar (SLLidar C1) + ICP Odometry
+# File: my_robot_bringup/config/rtabmap/rtabmap_stereo_lidar.yaml (or your chosen name)
+
+rtabmap:
+  ros__parameters:
+    # ─── Core Frame Configuration ───
+    frame_id: "base_link"         # The robot's base frame.
+    map_frame_id: "map"           # The world-fixed map frame.
+    odom_frame_id: "rtabmap_odom" # Odometry frame. MUST MATCH icp_odometry_node's 'odom_frame_id'
+                                  # and rtabmap_slam_node's 'odom_frame_id' in the launch file.
+    publish_tf: true              # RTAB-Map publishes map -> odom_frame_id transform.
+    tf_delay: 0.05                # Delay (s) for TF publication.
+    odom_sensor_sync: false       # Sync with odom topic, not TF directly.
+
+    # ─── Input Data Subscription ───
+    subscribe_depth: false
+    subscribe_rgb: false
+    subscribe_stereo: true        # *** ENABLED FOR D405 STEREO ***
+    subscribe_scan: true          # For SLLidar C1
+    subscribe_scan_cloud: false   # Not using point cloud directly as input, using LaserScan
+    subscribe_user_data: false
+    subscribe_odom_info: false    # Set to true if your ICP odometry publishes /odom_info and you want to use its covariances/features
+
+    # --- Topic Names (actual topics are remapped in the launch file) ---
+    # These are the internal names RTAB-Map expects before remapping.
+    # stereo_left_image_topic: "/stereo_camera/left/image_rect"  # Remapped to /camera/camera/infra1/image_rect_raw
+    # stereo_right_image_topic: "/stereo_camera/right/image_rect" # Remapped to /camera/camera/infra2/image_rect_raw
+    # stereo_left_camera_info_topic: "/stereo_camera/left/camera_info" # Remapped to /camera/camera/infra1/camera_info
+    # stereo_right_camera_info_topic: "/stereo_camera/right/camera_info" # Remapped to /camera/camera/infra2/camera_info
+    # scan_topic: "/scan"                                         # Remapped to /scan
+    odom_topic: "/rtabmap_odom_raw_msgs"                          # Remapped to /rtabmap_odom_raw_msgs (from ICP)
+
+    # ─── Data Synchronization (CRITICAL for multi-sensor fusion) ───
+    approx_sync: true             # Use approximate time synchronization.
+    approx_sync_max_interval: 0.15 # Increased from 0.08 to 0.15 for better sync tolerance
+    sync_queue_size: 50            # Increased from 30 to 50 for better buffering
+
+    # ─── General SLAM Parameters ───
+    Rtabmap/DetectionRate: "1.0"   # Changed from 0.5 to 1.0 for more frequent updates
+    Rtabmap/TimeThr: "500"         # Reduced from 700 to 500ms for more frequent map nodes
+    Mem/IncrementalMemory: "true"    # Use incremental memory management.
+    Mem/STMSize: "30"              # Short Term Memory size (number of recent locations).
+
+    # ─── CRITICAL: Enable occupancy grid creation and storage ───
+    RGBD/CreateOccupancyGrid: "true"  # MUST be true to generate occupancy grids
+    Grid/FromDepth: "false"          # Generate grid from laser scans, not depth images.
+
+    # ─── Loop Closure Detection ───
+    RGBD/LoopClosureEnabled: "true"  # Enables both visual and scan-based loop closures.
+    RGBD/ProximityBySpace: "true"    # Proximity detection based on spatial distance (for lidar).
+    # RGBD/ProximityByTime: false  # Don't detect proximity just by time.
+
+    # --- Visual Loop Closure (for Stereo) ---
+    Vis/LoopClosureEnabled: "true"
+    Vis/FeatureType: "6"           # ORB features (good default, relatively fast).
+                                   # Options: 0=SURF, 1=SIFT, 2=ORB, 3=FAST/FREAK, 4=FAST/BRIEF, 5=GFTT/FREAK, 6=GFTT/BRIEF, 7=BRISK, 8=GFTT/ORB, 10=SUPERPOINT_OPENIMAGE, 11=SUPERPOINT_COCO, 12=SUPERPOINT_KITTI
+    Vis/MaxFeatures: "600"         # Max features to extract per image (stereo left). Reduced for Pi 5.
+    Vis/MinInliers: "20"           # Minimum inliers for a visual loop closure. Start lower for stereo, tune up if false positives. (15-25 is a good range to test)
+    Vis/CorType: "0"               # Correspondence type: 0=Features, 1=OpticalFlow
+    Vis/CorNNType: "1"             # Nearest Neighbor search strategy for ORB (FLANN_KDTREE=0, FLANN_LSH=1). LSH is good for binary descriptors.
+    Vis/EpipolarGeometryVar: "0.01" # Variance for epipolar geometry constraint (stricter check).
+    # Vis/PnPFlags: "0"            # 0=Iterative, 1=EPNP, 2=P3P. Iterative is often more robust.
+    # Vis/PnPReprojError: "2.0"    # Max reprojection error for PnP inliers.
+
+    # --- Stereo Specific Parameters ---
+    Stereo/WinSize: "16"           # SAD window size for block matching.
+    Stereo/MaxDisparity: "128"     # Maximum disparity. 0 means auto. D405 can go higher, but 128 is often fine for reasonable depths.
+    Stereo/MinDisparity: "1"       # Minimum disparity.
+    Stereo/OpticalFlow: "true"     # Use optical flow to find correspondences for stereo.
+    Stereo/Iterations: "30"        # Iterations for stereo processing.
+    Stereo/Eps: "0.01"             # Stereo processing epsilon.
+    # Stereo/MaxLevel: "3"         # Max pyramid level for optical flow.
+    # Stereo/ExposureCompensation: false # If your left/right images have different exposures.
+
+    # --- Lidar Loop Closure & Refinement ---
+    Reg/Strategy: "1"              # Registration strategy: 0=Visual, 1=ICP (Lidar), 2=Visual+ICP.
+                                   # "1" forces ICP refinement for ALL loop closures (visual or proximity). Good for lidar emphasis.
+    Reg/Force3DoF: "true"            # Constrain loop closure transforms to 2D (x, y, yaw).
+    Icp/CorrespondenceRatio: "0.1" # Minimum ratio of correspondences for ICP.
+    Icp/MaxTranslation: "0.3"      # Max translation for ICP.
+    Icp/MaxRotation: "0.785"       # Max rotation (radians, e.g., 45 deg) for ICP.
+    Icp/Iterations: "30"           # ICP iterations.
+    Icp/VoxelSize: "0.05"          # Voxel size for ICP scan downsampling.
+    Icp/Epsilon: "0.001"
+    # Icp/PointToPlane: false      # Use point-to-point ICP.
+    # Icp/PMOutlierRatio: "0.7"    # For libpointmatcher, ratio of outliers to reject.
+
+    # ─── Odometry Parameters (RTAB-Map's internal odometry, if not using external like ICP) ───
+    # Since we are using external ICP odometry (rtabmap_odom/icp_odometry),
+    # these are less critical unless RTAB-Map needs to compute its own odometry as a fallback
+    # or if `odom_topic` was not subscribed.
+    # Odom/Strategy: "0"             # 0=Frame-to-Frame, 1=Frame-to-Map. Frame-to-frame is typical for external odom.
+    # Vis/EstimationType: "0"        # 0=3DoF (x,y,yaw), 1=6DoF. If Reg/Force3DoF is true, this should also be 3DoF.
+    # Odom/Holonomic: false          # For differential drive robots.
+    # Odom/GuessMotion: true
+    # Vis/MaxDepth: "0"              # For stereo, 0 means use disparity.
+    # Vis/MinDepth: "0.0"
+
+    # ─── 2D Occupancy Grid Map Generation (from Lidar) ───
+    Grid/RayTracing: "true"          # Use ray tracing to clear free space.
+    Grid/CellSize: "0.05"          # Grid cell size (meters).
+    Grid/RangeMin: "0.12"          # Changed from 0.15 to 0.12 to match lidar settings
+    Grid/RangeMax: "10.0"          # Max Lidar range for grid mapping
+    Grid/ClusterRadius: "0.1"
+    Grid/GroundIsObstacle: "false" # If true, lidar scans hitting ground are obstacles.
+    Grid/MapFrameProjection: "false" # If true, projects laser scans into map frame before adding to grid.
+    Grid/Sensor: "0"               # Force use laser scans for occupancy grid
+    Grid/3D: "false"               # Force 2D grid mapping
+    GridGlobal/MinSize: "20"       # Minimum grid size in meters
+    GridGlobal/UpdateError: "0.01" # Update error threshold
+    Grid/MaxObstacleHeight: "2.0"  # Maximum height for obstacles
+    Grid/MaxGroundHeight: "0.0"    # Maximum ground height
+    Grid/NormalK: "20"             # Number of neighbors for normal estimation
+    Grid/NoiseFilteringRadius: "0.0"  # Disable noise filtering (0.0)
+    Grid/NoiseFilteringMinNeighbors: "5"
+
+    # ─── Path Planning (for rtabmap_ros/GoalManager, if used for simple goals) ───
+    # Planner/Iterations: "1000"
+    # Planner/GoalReachedRadius: "0.2"
+    # Planner/UpdatePath: "true"
+
+    # ─── Graph Optimization ───
+    Optimizer/Strategy: "1"        # 0=TORO, 1=g2o, 2=GTSAM, 3=Ceres. g2o is common.
+    Optimizer/Iterations: "10"     # Number of iterations for graph optimization.
+    Optimizer/Slam2D: true         # Force 2D optimization (relevant if Reg/Force3DoF is true).
+    # Optimizer/Robust: true
+
+    # ─── Database Management ───
+    # Mem/DbSqlite3CacheSize: "1000"
+    # Mem/ImagePreDecimation: "1"    # Decimate images before storing (1=no decimation).
+    # Mem/ImagePostDecimation: "1"
+
+    # ─── Other / Advanced ───
+    # RGBD/LinearUpdate: "0"         # Linear displacement (m) to add a new node to map. 0=disabled (use TimeThr).
+    # RGBD/AngularUpdate: "0"        # Angular displacement (rad) to add a new node. 0=disabled.
+    # RGBD/OptimizeFromGraphEnd: false # If true, optimize from the end of the graph.
+    # Rtabmap/StartNewMapOnLoopClosure: false
+    # Rtabmap/ImageBufferSize: "1"
+    # Normals/OrientToCamera: false
+
+    # Parameters that might need tuning based on performance/warnings:
+    # Rtabmap/MaxLoopAngle: "60" # Degrees
+    # Vis/CorFlowWinSize: "16"
+    # Vis/CorGuessWinSize: "0"
+    # Vis/CorMaxLevel: "3"
+
+    # If using IMU data (not in your current D405 setup)
+    # subscribe_imu: false
+    # imu_topic: "/imu/data"
+    # Reg/ForceOdomGravity: false # If IMU provides gravity vector for odometry refinement
+    # Optimizer/GravitySigma: "0.3" # If gravity constraint is used in optimization

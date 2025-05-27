@@ -1,0 +1,82 @@
+rtabmap:
+  ros__parameters:
+    # ─── Frame configuration ───
+    frame_id: "base_link"
+    odom_frame_id: "rtabmap/odom"
+    map_frame_id: "map"
+
+    # ─── LiDAR-only input ───
+    subscribe_scan: true
+    subscribe_scan_cloud: false
+    subscribe_depth: false
+    subscribe_rgb: false
+    subscribe_stereo: false
+    subscribe_rgbd: false
+    rgbd_cameras: 0
+
+    # ─── Topics ───
+    scan_topic: "/scan"
+    odom_topic: "/rtabmap/odom"
+    subscribe_odom_info: true
+
+    # ─── Synchronization ───
+    approx_sync: true
+    queue_size: 10
+
+    # ─── Odometry ───
+    icp_odometry: true
+    visual_odometry: false
+
+    # ─── 2D occupancy grid (nested mapping!) ───
+    Grid:
+      Sensor:                           0      # use LaserScan
+      FromDepth:                        false  # no depth-based grid
+      RangeMin:                         0.12
+      RangeMax:                         10.0
+      CellSize:                         0.05    # now a double, not a string
+      MapNegativeScansEmptyOverRayTrace: true
+
+    # ─── Continuous map updates ───
+    RGBD:
+      AngularUpdate:                    0.8    # Even higher threshold for extreme tank rotations
+      LinearUpdate:                     0.15
+      ScanMatchingSize:                 5      # Use more scans to find registration
+      OptimizeFromGraphEnd:             true   # Optimize from most recent poses
+      OptimizeMaxError:                 2.0    # More error tolerance for optimization
+
+    map_always_update:                  true
+    map_empty_ray_tracing:              true
+
+    # ─── Memory & registration ───
+    Mem:
+      IncrementalMemory:                true
+      RehearsalSimilarity:              0.30   # More tolerant loop closure (default 0.20)
+      
+    Reg:
+      Strategy:                         1      # ICP
+      Force3DoF:                        true
+      MotionThreshold:                  0.5    # Higher threshold for tank movements
+      MaxTranslation:                   0.4    # More restrictive translation
+      MaxRotation:                      0.6    # More permissive rotation (~35 deg)
+      Iterations:                       50     # More iterations for convergence
+      CorrespondenceRatio:              0.35   # More tolerant matching for disconnected scans
+
+    # ─── ICP specific parameters ───
+    Icp:
+      RotationVelocityThreshold:        0.8    # Set dedicated rotation threshold
+      VoxelSize:                        0.05   # For scan decimation
+      PointToPlaneRadius:               0.1    # For better scan matching
+      PointToPlaneGroundNormalsUp:      0.8    # For better ground detection
+      Epsilon:                          0.001  # Convergence criteria
+      MaxCorrespondenceDistance:        0.3    # Maximum distance for correspondence points
+      RobustFunction:                   true   # Use robust estimation
+
+    # ─── Disable visual features ───
+    Rtabmap:
+      ImagesAlreadySynchronized:        true
+      DetectionRate:                    1.0    # Process every scan (default 1.0)
+      LoopClosureReextractFeatures:     true   # Reextract features for loop closure
+      CreateIntermediateNodes:          true   # Create nodes during fast motion
+      
+    Vis:
+      MaxFeatures:                      0

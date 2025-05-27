@@ -1,0 +1,75 @@
+# RTAB-Map configuration for Lidar-Only SLAM with Robust ICP Odometry
+# File: my_robot_bringup/config/rtabmap/rtabmap_lidar_only_robust_icp.yaml
+
+rtabmap:
+  ros__parameters:
+    # ─── Core Frame Configuration ───
+    frame_id: "base_link"
+    map_frame_id: "map"
+    odom_frame_id: "rtabmap_odom" # From icp_odometry node
+    publish_tf: true
+    tf_delay: 0.05
+    tf_tolerance: 0.1
+    odom_sensor_sync: false
+
+    # ─── Input Data Subscription (LIDAR ONLY) ───
+    subscribe_depth: false
+    subscribe_rgb: false
+    subscribe_stereo: false       # CAMERA DISABLED
+    subscribe_scan: true
+    subscribe_scan_cloud: false
+    subscribe_odom_info: false
+
+    # --- Topic Names ---
+    odom_topic: "/rtabmap_odom_raw_msgs" # From icp_odometry node
+    # scan_topic remapped in launch
+
+    # ─── Data Synchronization (Odom + Scan) ───
+    approx_sync: false            # Try exact sync first for odom+scan
+    queue_size: 100               # For exact sync
+    sync_queue_size: 100          # For approx_sync if enabled later
+    # approx_sync_max_interval: 0.1 # Only if approx_sync is true
+
+    # ─── General SLAM Parameters ───
+    Rtabmap/DetectionRate: "1.0"   # 1Hz for lidar-only
+    Rtabmap/TimeThr: "700"
+    Mem/IncrementalMemory: "true"
+    Mem/STMSize: "30"
+
+    # ─── CRITICAL: Enable occupancy grid creation ───
+    RGBD/CreateOccupancyGrid: "true"
+
+    # ─── Loop Closure Detection (LIDAR BASED) ───
+    RGBD/LoopClosureEnabled: "true"
+    RGBD/ProximityBySpace: "true"
+    RGBD/ProximityPathMaxNeighbors: "10"
+
+    Vis/LoopClosureEnabled: "false"    # VISUALS DISABLED
+
+    # --- Lidar Loop Closure & Refinement (Parameters for RTAB-Map's internal ICP when doing loop closure) ---
+    # Note: icp_odometry node has its own ICP params for odometry generation.
+    # These Reg/Icp params are for when RTAB-Map itself performs ICP, e.g., for loop closure refinement.
+    Reg/Strategy: "1"                # Use ICP (Lidar) to refine loop closures
+    Reg/Force3DoF: "true"
+    Icp/CorrespondenceRatio: "0.1"   # Min inlier ratio for loop closure ICP
+    Icp/MaxTranslation: "0.5"        # Allow larger corrections for loop closure
+    Icp/MaxRotation: "1.0"           # Allow larger rotations for loop closure
+    Icp/Iterations: "30"
+    Icp/VoxelSize: "0.05"            # Voxel size for loop closure ICP
+    Icp/Epsilon: "0.001"
+
+    # ─── 2D Occupancy Grid Map Generation (from Lidar) ───
+    Grid/FromDepth: "false"
+    Grid/RayTracing: "true"
+    Grid/CellSize: "0.05"
+    Grid/RangeMin: "0.12"
+    Grid/RangeMax: "10.0"
+    Grid/Sensor: "0"                 # Use LaserScan
+    Grid/3D: "false"
+
+    # ─── Graph Optimization ───
+    Optimizer/Strategy: "1"          # g2o
+    Optimizer/Iterations: "10"
+    Optimizer/Slam2D: "true"
+
+    Rtabmap/StatisticLogged: "false"   # Keep false unless actively debugging RTAB-Map SLAM node
