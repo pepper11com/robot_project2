@@ -48,10 +48,18 @@ def generate_launch_description():
             'width_meters': 3.5,
             'height_meters': 3.5,
             'resolution': 0.05,
-            'inflation_radius_m': 0.30,  # Increased for better local footprint checking. TUNE!
             'costmap_update_frequency': 5.0,
             'obstacle_cost_value': 100,
-            'transform_timeout_sec': 0.2
+            'transform_timeout_sec': 0.4,
+            
+            
+            
+            # Inflation parameters for local costmap
+            'inflation_radius_m': 0.25,  # Max distance inflation spreads. TUNE THIS CAREFULLY!
+                                         # Should be robot_radius + desired_clearance_from_obstacles.
+                                         # Example: 0.2m robot radius + 0.15m clearance = 0.35m.
+            'max_inflation_cost': 90,    # Max cost for an inflated cell (0-99, must be < 100).
+            'cost_scaling_factor': 10.0, # How sharply cost drops. Higher = faster drop. TUNE!
         }]
     )
 
