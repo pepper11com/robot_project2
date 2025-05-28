@@ -13,7 +13,18 @@ from std_msgs.msg import Float32MultiArray # For receiving temporary avoidance p
 
 LETHAL_OBSTACLE_COST_INTERNAL = 254
 UNKNOWN_COST_INTERNAL = 253
-TEMPORARY_AVOIDANCE_COST = 253 # VERY HIGH, but not lethal. Ensure cost_inflated_max < this.
+# Cost for the 'lethal core' of a temporary obstacle for A* planning.
+# Should be high enough that A* strongly avoids it, but distinguishable from static lethal if needed for debug.
+TEMP_OBSTACLE_PLANNING_CORE_COST = LETHAL_OBSTACLE_COST_INTERNAL - 1 # e.g., 253
+
+# --- New Constants for Inflated Temporary Obstacles ---
+# Radius of the 'solid' (highest cost) part of a temporary obstacle for A* planning.
+# This should be roughly your robot's radius or slightly more.
+TEMP_OBSTACLE_LETHAL_CORE_RADIUS_M = 0.20
+# Cost value at the edge of the lethal core, from which inflation will decay outwards.
+# Should be > self.cost_inflated_max (for static inflation) to make temp obstacles more repulsive.
+TEMP_OBSTACLE_INFLATION_COST_AT_CORE_EDGE = 230
+# ----------------------------------------------------
 
 class SimpleGlobalPlanner(Node):
     def __init__(self):
@@ -24,18 +35,23 @@ class SimpleGlobalPlanner(Node):
         self.declare_parameter('goal_topic', '/goal_pose')
         self.declare_parameter('robot_base_frame', 'base_link')
         self.declare_parameter('global_frame', 'map')
-        self.declare_parameter('inflation_radius_m', 0.3) # Global inflation
-        self.declare_parameter('cost_lethal_threshold', 90) # From raw map
+        self.declare_parameter('inflation_radius_m', 0.3)
+        self.declare_parameter('cost_lethal_threshold', 90)
         self.declare_parameter('cost_unknown_as_lethal', True)
-        self.declare_parameter('cost_inflated_max', 220) # Max for regular inflation
+        self.declare_parameter('cost_inflated_max', 220)
         self.declare_parameter('cost_neutral', 1)
-        self.declare_parameter('cost_penalty_multiplier', 5.0) # Higher penalty
+        self.declare_parameter('cost_penalty_multiplier', 2.0) # Adjusted default
         self.declare_parameter('enable_path_simplification', True)
         self.declare_parameter('simplification_obstacle_check_expansion_cells', 1)
         self.declare_parameter('simplification_max_allowed_cost', 50)
         self.declare_parameter('temp_avoidance_topic', '/temp_avoidance_points')
-        self.declare_parameter('temp_avoidance_radius_m', 0.75)
+        # This 'temp_avoidance_radius_m' is now the OUTER boundary for temp obstacle inflation
+        # AND the hard boundary for path simplification checks.
+        self.declare_parameter('temp_avoidance_radius_m', 0.35) # Adjusted default
         self.declare_parameter('temp_avoidance_point_lifetime_s', 7.0)
+        # Optional: make core radius and edge cost ROS params if more tuning needed
+        # self.declare_parameter('temp_obstacle_lethal_core_radius_m', TEMP_OBSTACLE_LETHAL_CORE_RADIUS_M)
+        # self.declare_parameter('temp_obstacle_inflation_cost_at_core_edge', TEMP_OBSTACLE_INFLATION_COST_AT_CORE_EDGE)
 
 
         self.map_topic = self.get_parameter('map_topic').value
@@ -55,10 +71,12 @@ class SimpleGlobalPlanner(Node):
         self.temp_avoidance_topic_name = self.get_parameter('temp_avoidance_topic').value
         self.temp_avoidance_radius_m = self.get_parameter('temp_avoidance_radius_m').value
         self.temp_avoidance_point_lifetime_s = self.get_parameter('temp_avoidance_point_lifetime_s').value
+        # self.temp_obstacle_lethal_core_radius_m_param = self.get_parameter('temp_obstacle_lethal_core_radius_m').value
+        # self.temp_obstacle_inflation_cost_at_core_edge_param = self.get_parameter('temp_obstacle_inflation_cost_at_core_edge').value
 
 
         self.map_data: OccupancyGrid | None = None
-        self.base_costmap: np.ndarray | None = None 
+        self.base_costmap: np.ndarray | None = None
         self.planning_costmap: np.ndarray | None = None
         self.map_info: OccupancyGrid.info | None = None
 
@@ -72,15 +90,17 @@ class SimpleGlobalPlanner(Node):
         self.temp_avoidance_sub = self.create_subscription(
             Float32MultiArray, self.temp_avoidance_topic_name, self._temp_avoidance_callback, 10)
 
-        self.get_logger().info(f"SimpleGlobalPlanner initialized. Listening for map on '{self.map_topic}', goals on '{self.goal_topic_name}'.")
-        self.get_logger().info(f"Temporary avoidance enabled on '{self.temp_avoidance_topic_name}', radius {self.temp_avoidance_radius_m}m, lifetime {self.temp_avoidance_point_lifetime_s}s.")
+        self.get_logger().info(f"SimpleGlobalPlanner initialized. Temp avoidance outer radius: {self.temp_avoidance_radius_m}m. Core radius for A*: {TEMP_OBSTACLE_LETHAL_CORE_RADIUS_M}m.")
 
 
     def _temp_avoidance_callback(self, msg: Float32MultiArray):
         if len(msg.data) == 2:
             x, y = msg.data[0], msg.data[1]
             self.get_logger().info(f"Received temporary avoidance point: ({x:.2f}, {y:.2f}) in map frame.")
-            self.temporary_avoidance_points = [p for p in self.temporary_avoidance_points if not (math.isclose(p[0], x, abs_tol=0.1) and math.isclose(p[1], y, abs_tol=0.1))] # Remove near duplicates
+            self.temporary_avoidance_points = [
+                p for p in self.temporary_avoidance_points
+                if not (math.isclose(p[0], x, abs_tol=0.1) and math.isclose(p[1], y, abs_tol=0.1))
+            ]
             self.temporary_avoidance_points.append((x, y, self.get_clock().now()))
         else:
             self.get_logger().warn(f"Received invalid temp_avoidance_point message. Expected 2 floats, got {len(msg.data)}.")
@@ -95,43 +115,90 @@ class SimpleGlobalPlanner(Node):
         if initial_count > len(self.temporary_avoidance_points):
             self.get_logger().debug(f"Cleaned up {initial_count - len(self.temporary_avoidance_points)} old avoidance points.")
 
-
+    # --- MODIFIED METHOD ---
     def _apply_temporary_avoidances(self):
         if self.base_costmap is None or self.map_info is None:
             self.planning_costmap = None
             self.get_logger().warn("Base costmap or map info not available for applying temporary avoidances.")
             return
-        
+
         self._cleanup_old_avoidance_points()
-        self.planning_costmap = np.copy(self.base_costmap) 
+        self.planning_costmap = np.copy(self.base_costmap) # Start with static map + its inflation
 
         if not self.temporary_avoidance_points or self.map_info.resolution == 0:
-            if self.temporary_avoidance_points:
+            if self.temporary_avoidance_points and self.map_info.resolution == 0:
                  self.get_logger().debug("Map resolution is 0, cannot apply temporary avoidances.")
             return
 
-        radius_cells = int(self.temp_avoidance_radius_m / self.map_info.resolution)
-        height, width = self.planning_costmap.shape
+        # Outer radius for any effect of the temporary obstacle (from ROS param)
+        outer_radius_cells = int(self.temp_avoidance_radius_m / self.map_info.resolution)
+        # Radius for the 'lethal' core of the temporary obstacle for A* (from global constant)
+        # Use self.temp_obstacle_lethal_core_radius_m_param if made configurable
+        lethal_core_radius_cells = int(TEMP_OBSTACLE_LETHAL_CORE_RADIUS_M / self.map_info.resolution)
+        # Ensure lethal core is not larger than outer radius
+        lethal_core_radius_cells = min(lethal_core_radius_cells, outer_radius_cells)
 
+
+        height, width = self.planning_costmap.shape
         applied_count = 0
+
         for avoid_x, avoid_y, _ in self.temporary_avoidance_points:
             map_coords = self._world_to_map(avoid_x, avoid_y)
             if map_coords:
                 center_r, center_c = map_coords
-                for r_offset in range(-radius_cells, radius_cells + 1):
-                    for c_offset in range(-radius_cells, radius_cells + 1):
-                        # Check if within circular radius
-                        if r_offset**2 + c_offset**2 <= radius_cells**2:
-                            r, c = center_r + r_offset, center_c + c_offset
-                            if 0 <= r < height and 0 <= c < width:
-                                # Only increase cost, don't overwrite lethal obstacles or lower existing high costs
-                                if self.planning_costmap[r,c] < TEMPORARY_AVOIDANCE_COST and \
-                                   self.planning_costmap[r,c] < LETHAL_OBSTACLE_COST_INTERNAL: # Don't mark lethal as less
-                                     self.planning_costmap[r, c] = TEMPORARY_AVOIDANCE_COST
-                applied_count +=1
-        if applied_count > 0:
-            self.get_logger().info(f"Applied {applied_count} temporary avoidance zones to planning_costmap.")
+                applied_count += 1
 
+                # Iterate in a square region around the temp obstacle center up to outer_radius
+                for r_offset in range(-outer_radius_cells, outer_radius_cells + 1):
+                    for c_offset in range(-outer_radius_cells, outer_radius_cells + 1):
+                        r, c = center_r + r_offset, center_c + c_offset
+
+                        if not (0 <= r < height and 0 <= c < width): # Cell out of bounds
+                            continue
+
+                        # Distance from current cell (r,c) to temp obstacle center (center_r, center_c)
+                        dist_cells_sq = r_offset**2 + c_offset**2
+                        dist_cells = math.sqrt(dist_cells_sq) # Distance in cells
+
+                        # Skip if this cell is beyond the outer radius of influence for this temp point
+                        if dist_cells > outer_radius_cells:
+                            continue
+
+                        # Start with the cost already on the planning_costmap (from base_costmap inflation)
+                        new_cost_for_cell = self.planning_costmap[r, c]
+
+                        # If cell is already marked as statically lethal, don't reduce its cost
+                        if new_cost_for_cell >= LETHAL_OBSTACLE_COST_INTERNAL:
+                            continue
+
+                        calculated_temp_penalty = 0 # Penalty specifically from this temporary obstacle
+
+                        if dist_cells <= lethal_core_radius_cells:
+                            # Inside the 'lethal' core for A* planning
+                            calculated_temp_penalty = TEMP_OBSTACLE_PLANNING_CORE_COST
+                        elif dist_cells <= outer_radius_cells:
+                            # Inside the inflation zone, outside the lethal core
+                            inflation_band_width_cells = outer_radius_cells - lethal_core_radius_cells
+                            if inflation_band_width_cells < 1e-3 : # Effectively no inflation band
+                                if dist_cells <= outer_radius_cells: # Treat as core if band is non-existent
+                                    calculated_temp_penalty = TEMP_OBSTACLE_PLANNING_CORE_COST
+                            else:
+                                normalized_dist_in_inflation_band = (dist_cells - lethal_core_radius_cells) / inflation_band_width_cells
+                                # Linear decay: factor = 1.0 at core edge, 0.0 at outer_radius_cells
+                                factor = 1.0 - normalized_dist_in_inflation_band
+                                factor = max(0.0, min(1.0, factor)) # Clamp factor [0,1]
+
+                                # Cost decays from TEMP_OBSTACLE_INFLATION_COST_AT_CORE_EDGE down to self.cost_neutral
+                                # Use self.temp_obstacle_inflation_cost_at_core_edge_param if configurable
+                                inflated_val = int((TEMP_OBSTACLE_INFLATION_COST_AT_CORE_EDGE - self.cost_neutral) * factor + self.cost_neutral)
+                                calculated_temp_penalty = max(self.cost_neutral, min(inflated_val, TEMP_OBSTACLE_INFLATION_COST_AT_CORE_EDGE))
+                        
+                        # Update the planning_costmap cell if the temporary penalty is higher than its current cost
+                        if calculated_temp_penalty > self.planning_costmap[r,c]:
+                             self.planning_costmap[r, c] = np.uint8(calculated_temp_penalty)
+        if applied_count > 0:
+            self.get_logger().info(f"Applied {applied_count} INFLATED temporary avoidance zones to planning_costmap.")
+    # --- END OF MODIFIED METHOD ---
 
     def _map_callback(self, msg: OccupancyGrid):
         self.get_logger().info(f"Received map: {msg.info.width}x{msg.info.height}, res: {msg.info.resolution}, frame: '{msg.header.frame_id}'")
@@ -149,14 +216,18 @@ class SimpleGlobalPlanner(Node):
         height = self.map_info.height
         self.base_costmap = np.full((height, width), self.cost_neutral, dtype=np.uint8)
         raw_map_data = np.array(self.map_data.data).reshape((height, width))
+
         obstacle_indices = raw_map_data >= self.cost_lethal_threshold
         self.base_costmap[obstacle_indices] = LETHAL_OBSTACLE_COST_INTERNAL
+
         if self.cost_unknown_as_lethal:
             unknown_indices = raw_map_data == -1
-            self.base_costmap[unknown_indices] = LETHAL_OBSTACLE_COST_INTERNAL
+            self.base_costmap[unknown_indices] = UNKNOWN_COST_INTERNAL
+
         self.get_logger().info("Base costmap created from static map. Starting inflation...")
         self._inflate_obstacles_on_basemap()
         self.get_logger().info("Base costmap inflation complete.")
+        self.planning_costmap = np.copy(self.base_costmap)
 
     def _inflate_obstacles_on_basemap(self):
         if self.base_costmap is None or self.map_info is None or self.map_info.resolution == 0: return
@@ -166,11 +237,11 @@ class SimpleGlobalPlanner(Node):
 
         inflated_copy = np.copy(self.base_costmap)
         queue = collections.deque()
-        visited_for_inflation = np.array(self.base_costmap == LETHAL_OBSTACLE_COST_INTERNAL)
+        visited_for_inflation = np.array(self.base_costmap >= LETHAL_OBSTACLE_COST_INTERNAL)
 
         for r in range(height):
             for c in range(width):
-                if self.base_costmap[r, c] == LETHAL_OBSTACLE_COST_INTERNAL:
+                if self.base_costmap[r, c] >= LETHAL_OBSTACLE_COST_INTERNAL:
                     queue.append((r, c, 0))
 
         while queue:
@@ -187,14 +258,12 @@ class SimpleGlobalPlanner(Node):
                             factor = (1.0 - float(new_dist_steps) / inflation_radius_cells)**2
                             cost_val = int((self.cost_inflated_max - self.cost_neutral) * factor + self.cost_neutral)
                             cost_val = max(self.cost_neutral, min(cost_val, self.cost_inflated_max))
-                            if inflated_copy[nr, nc] < LETHAL_OBSTACLE_COST_INTERNAL:
-                                inflated_copy[nr, nc] = max(inflated_copy[nr, nc], cost_val)
+                            if inflated_copy[nr, nc] < LETHAL_OBSTACLE_COST_INTERNAL: # Check against original lethal
+                                inflated_copy[nr, nc] = max(inflated_copy[nr, nc], np.uint8(cost_val))
                             if new_dist_steps < inflation_radius_cells:
                                 queue.append((nr, nc, new_dist_steps))
         self.base_costmap = inflated_copy
 
-    # ... (_world_to_map, _map_to_world, _get_robot_pose_in_global_frame as before) ...
-    # ... (_is_cell_traversable, _bresenham_line_check, _simplify_path_los as before, ensure they use planning_costmap where appropriate for A*) ...
     def _world_to_map(self, world_x, world_y) -> tuple[int, int] | None:
         if self.map_info is None: return None
         origin_x = self.map_info.origin.position.x
@@ -227,13 +296,14 @@ class SimpleGlobalPlanner(Node):
             pose.position.x = transform_stamped.transform.translation.x
             pose.position.y = transform_stamped.transform.translation.y
             pose.position.z = transform_stamped.transform.translation.z
+            pose.orientation = transform_stamped.transform.rotation
             return pose
         except Exception as e:
             self.get_logger().error(f"TF lookup from '{self.robot_base_frame}' to '{self.global_frame}' failed: {e}", throttle_duration_sec=1.0)
             return None
 
     def _is_cell_traversable(self, r: int, c: int, check_expansion: int = 0, cost_threshold: int = LETHAL_OBSTACLE_COST_INTERNAL, costmap_to_check: np.ndarray | None = None) -> bool:
-        active_costmap = costmap_to_check if costmap_to_check is not None else self.planning_costmap
+        active_costmap = costmap_to_check
         if active_costmap is None:
             self.get_logger().warn("_is_cell_traversable called with no active_costmap", throttle_duration_sec=5.0)
             return False
@@ -246,32 +316,68 @@ class SimpleGlobalPlanner(Node):
                     return False
         return True
 
+    def _is_cell_within_any_temp_avoidance_zone(self, r: int, c: int) -> bool:
+        if not self.temporary_avoidance_points or self.map_info is None or self.map_info.resolution == 0:
+            return False
+        world_coords = self._map_to_world(r, c)
+        if world_coords is None:
+            return True
+        world_x, world_y = world_coords
+        
+        # This radius (self.temp_avoidance_radius_m) is the hard boundary for simplification.
+        # A* plans using an inflated zone *within* this.
+        hard_boundary_radius_sq = self.temp_avoidance_radius_m ** 2
+        
+        # For simplification, consider a slight expansion if check_expansion_cells > 0
+        # This is to ensure that if a cell center is clear, its expanded footprint for simplification check is also clear
+        # of the hard boundary.
+        effective_check_radius_sq = (self.temp_avoidance_radius_m + self.simplification_obstacle_check_expansion_cells * self.map_info.resolution * 0.5)**2
+
+
+        for avoid_x_center, avoid_y_center, _ in self.temporary_avoidance_points:
+            dist_sq = (world_x - avoid_x_center)**2 + (world_y - avoid_y_center)**2
+            if dist_sq <= effective_check_radius_sq: # Check against the hard boundary for simplification
+                return True
+        return False
+
     def _bresenham_line_check(self, p1_rc: tuple[int, int], p2_rc: tuple[int, int]) -> bool:
-        active_costmap_for_los = self.planning_costmap # Simplification can use the costlier map
-        if active_costmap_for_los is None: return False
+        costmap_for_static_checks = self.base_costmap
+        if costmap_for_static_checks is None:
+            self.get_logger().warn("Bresenham: base_costmap not available.", throttle_duration_sec=5.0)
+            return False
         r1, c1 = p1_rc; r2, c2 = p2_rc
-        dr, dc = abs(r2 - r1), abs(c2 - c1)
+        dr_abs, dc_abs = abs(r2 - r1), abs(c2 - c1)
         sr = 1 if r1 < r2 else -1 if r1 > r2 else 0
         sc = 1 if c1 < c2 else -1 if c1 > c2 else 0
-        err = dr - dc
+        err = dr_abs - dc_abs
         curr_r, curr_c = r1, c1
-        max_steps, steps_taken = dr + dc + 2, 0
-        cost_thresh_for_simplification = self.simplification_max_allowed_cost
+        max_steps = dr_abs + dc_abs + 2
+        steps_taken = 0
+        cost_thresh_for_simplification_on_base = self.simplification_max_allowed_cost
         check_expansion = self.simplification_obstacle_check_expansion_cells
-        while steps_taken < max_steps:
-            if not self._is_cell_traversable(curr_r, curr_c, check_expansion, cost_thresh_for_simplification, active_costmap_for_los): return False
-            if curr_r == r2 and curr_c == c2: break
+
+        while steps_taken < max_steps :
+            if not self._is_cell_traversable(curr_r, curr_c, check_expansion,
+                                             cost_thresh_for_simplification_on_base,
+                                             costmap_for_static_checks):
+                return False
+            if self._is_cell_within_any_temp_avoidance_zone(curr_r, curr_c): # Check against hard boundary
+                return False
+            if curr_r == r2 and curr_c == c2:
+                return True
             e2 = 2 * err
-            next_r, next_c = curr_r, curr_c
-            if e2 > -dc: err -= dc; next_r += sr
-            if e2 < dr: err += dr; next_c += sc
-            if check_expansion == 0 and curr_r != next_r and curr_c != next_c:
-                if not self._is_cell_traversable(curr_r, next_c, 0, cost_thresh_for_simplification, active_costmap_for_los) or \
-                   not self._is_cell_traversable(next_r, curr_c, 0, cost_thresh_for_simplification, active_costmap_for_los): return False
-            curr_r, curr_c = next_r, next_c
+            prev_r, prev_c = curr_r, curr_c
+            if e2 > -dc_abs: err -= dc_abs; curr_r += sr
+            if e2 < dr_abs: err += dr_abs; curr_c += sc
+            if check_expansion == 0 and curr_r != prev_r and curr_c != prev_c:
+                if not self._is_cell_traversable(prev_r, curr_c, 0, cost_thresh_for_simplification_on_base, costmap_for_static_checks) or \
+                   self._is_cell_within_any_temp_avoidance_zone(prev_r, curr_c):
+                    return False
+                if not self._is_cell_traversable(curr_r, prev_c, 0, cost_thresh_for_simplification_on_base, costmap_for_static_checks) or \
+                   self._is_cell_within_any_temp_avoidance_zone(curr_r, prev_c):
+                    return False
             steps_taken +=1
-            if steps_taken >= max_steps: return False
-        return True
+        return False
 
     def _simplify_path_los(self, path_cells: list[tuple[int, int]]) -> list[tuple[int, int]]:
         if not path_cells or len(path_cells) <= 2: return path_cells
@@ -294,13 +400,14 @@ class SimpleGlobalPlanner(Node):
             return
         if msg.header.frame_id != self.global_frame:
             self.get_logger().warn(f"Goal received in frame '{msg.header.frame_id}', but planner operates in '{self.global_frame}'.")
-        
+            return
+
         current_robot_pose = self._get_robot_pose_in_global_frame()
         if current_robot_pose is None:
             self.get_logger().error("Failed to get current robot pose. Cannot plan path.")
             return
 
-        self._apply_temporary_avoidances()
+        self._apply_temporary_avoidances() # This now creates inflated temporary zones
         if self.planning_costmap is None:
              self.get_logger().error("Planning costmap not available after applying temporary avoidances.")
              return
@@ -312,15 +419,15 @@ class SimpleGlobalPlanner(Node):
 
         if start_map_coords is None: self.get_logger().error(f"Robot start ({start_world_x:.2f}, {start_world_y:.2f}) outside map."); return
         if goal_map_coords is None: self.get_logger().error(f"Goal ({goal_world_x:.2f}, {goal_world_y:.2f}) outside map."); return
-        
+
         start_r, start_c = start_map_coords
         goal_r, goal_c = goal_map_coords
-        self.get_logger().info(f"Planning from robot at map cell ({start_r},{start_c}) to goal cell ({goal_r},{goal_c}) using planning_costmap.")
+        self.get_logger().info(f"Planning from robot at map cell ({start_r},{start_c}) to goal cell ({goal_r},{goal_c}) using planning_costmap for A*.")
 
-        if self.planning_costmap[start_r, start_c] >= LETHAL_OBSTACLE_COST_INTERNAL: 
-            self.get_logger().error(f"Robot start ({start_r},{start_c}) is in a lethal obstacle on planning_costmap!"); return
-        if self.planning_costmap[goal_r, goal_c] >= LETHAL_OBSTACLE_COST_INTERNAL: 
-            self.get_logger().error(f"Goal ({goal_r},{goal_c}) is in a lethal obstacle on planning_costmap!"); return
+        if self.planning_costmap[start_r, start_c] >= LETHAL_OBSTACLE_COST_INTERNAL:
+            self.get_logger().error(f"Robot start ({start_r},{start_c}) is in a lethal/core obstacle on planning_costmap! Cost: {self.planning_costmap[start_r, start_c]}"); return
+        if self.planning_costmap[goal_r, goal_c] >= LETHAL_OBSTACLE_COST_INTERNAL:
+            self.get_logger().error(f"Goal ({goal_r},{goal_c}) is in a lethal/core obstacle on planning_costmap! Cost: {self.planning_costmap[goal_r, goal_c]}"); return
 
         path_cells = self._find_path_astar((start_r, start_c), (goal_r, goal_c))
 
@@ -328,22 +435,19 @@ class SimpleGlobalPlanner(Node):
             self.get_logger().info(f"Raw A* path found with {len(path_cells)} points.")
             simplified_path_cells = self._simplify_path_los(path_cells) if self.enable_path_simplification and len(path_cells) > 2 else path_cells
             self.get_logger().info(f"Final path to publish has {len(simplified_path_cells)} points.")
-            
             ros_path = Path()
             ros_path.header.stamp = self.get_clock().now().to_msg()
             ros_path.header.frame_id = self.map_data.header.frame_id
             for r_cell, c_cell in simplified_path_cells:
                 world_coords = self._map_to_world(r_cell, c_cell)
                 if world_coords:
-                    pose = PoseStamped()
-                    pose.header = ros_path.header 
+                    pose = PoseStamped(); pose.header = ros_path.header
                     pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = world_coords[0], world_coords[1], 0.0
                     pose.pose.orientation.w = 1.0
                     ros_path.poses.append(pose)
             self.path_pub.publish(ros_path)
         else:
             self.get_logger().warn(f"No path found from ({start_r},{start_c}) to ({goal_r},{goal_c}).")
-        
         self.publish_planning_costmap_for_debug()
 
     def _heuristic(self, p1_rc, p2_rc):
@@ -356,12 +460,13 @@ class SimpleGlobalPlanner(Node):
         g_score = np.full(self.planning_costmap.shape, float('inf')); g_score[start_rc] = 0
         f_score = np.full(self.planning_costmap.shape, float('inf')); f_score[start_rc] = self._heuristic(start_rc, goal_rc)
         height, width = self.planning_costmap.shape
-        processed_nodes_count = 0
+        processed_nodes_count = 0; max_processed_nodes = height * width * 1.5
         while open_set:
             processed_nodes_count += 1
-            if processed_nodes_count > height * width * 2: 
-                self.get_logger().warn("A* processed too many nodes, breaking loop."); return []
-            _, current_rc = heapq.heappop(open_set)
+            if processed_nodes_count > max_processed_nodes:
+                self.get_logger().warn(f"A* processed too many nodes ({processed_nodes_count}), breaking."); return []
+            current_f_score, current_rc = heapq.heappop(open_set)
+            if current_f_score > f_score[current_rc]: continue
             if current_rc == goal_rc: return self._reconstruct_path(came_from, current_rc)
             for dr in [-1, 0, 1]:
                 for dc in [-1, 0, 1]:
@@ -369,12 +474,18 @@ class SimpleGlobalPlanner(Node):
                     neighbor_rc = (current_rc[0] + dr, current_rc[1] + dc)
                     nr, nc = neighbor_rc
                     if not (0 <= nr < height and 0 <= nc < width): continue
+                    
+                    # Use cost from planning_costmap (includes static and temp inflated obstacles)
                     cell_cost_value = self.planning_costmap[nr, nc]
-                    if cell_cost_value >= LETHAL_OBSTACLE_COST_INTERNAL: continue
+                    # LETHAL_OBSTACLE_COST_INTERNAL is the hard threshold for A*
+                    if cell_cost_value >= LETHAL_OBSTACLE_COST_INTERNAL: continue 
+                                                                        
                     move_cost = math.sqrt(dr**2 + dc**2)
                     additional_penalty = 0
-                    if cell_cost_value > self.cost_neutral:
+                    # TEMP_OBSTACLE_PLANNING_CORE_COST is also a high cost that A* should penalize
+                    if cell_cost_value > self.cost_neutral : # Penalty for any non-neutral cell
                          additional_penalty = (float(cell_cost_value) - self.cost_neutral) * self.cost_penalty_multiplier
+                    
                     tentative_g_score = g_score[current_rc] + move_cost + additional_penalty
                     if tentative_g_score < g_score[neighbor_rc]:
                         came_from[neighbor_rc] = current_rc
@@ -397,55 +508,69 @@ class SimpleGlobalPlanner(Node):
         debug_map_msg.header.stamp = self.get_clock().now().to_msg()
         debug_map_msg.info = self.map_info
         viz_data = np.zeros_like(self.planning_costmap, dtype=np.int8)
+
+        # Lethal from static map or unknown treated as lethal
+        static_lethal_mask = (self.planning_costmap >= LETHAL_OBSTACLE_COST_INTERNAL)
+        
+        # Cells marked as temporary core by _apply_temporary_avoidances
+        temp_core_mask = (self.planning_costmap == TEMP_OBSTACLE_PLANNING_CORE_COST) & (~static_lethal_mask)
+        
+        # Cells inflated by temporary obstacles (but not core and not static lethal)
+        temp_inflated_mask = (self.planning_costmap > self.cost_neutral) & \
+                             (self.planning_costmap < TEMP_OBSTACLE_PLANNING_CORE_COST) & \
+                             (self.planning_costmap >= self.cost_inflated_max +1 ) & \
+                             (~static_lethal_mask) # Assuming temp inflation starts above static inflation max
+        
+        # Cells inflated only by static map (not lethal, not temp core, not temp inflated)
+        static_inflated_mask = (self.planning_costmap > self.cost_neutral) & \
+                               (self.planning_costmap <= self.cost_inflated_max) & \
+                               (~static_lethal_mask) & (~temp_core_mask) & (~temp_inflated_mask)
+
         neutral_mask = (self.planning_costmap <= self.cost_neutral)
-        lethal_mask = (self.planning_costmap >= LETHAL_OBSTACLE_COST_INTERNAL)
-        # Visualize temporary avoidance zones with a distinct value (e.g., 99)
-        temp_avoid_mask = (self.planning_costmap == TEMPORARY_AVOIDANCE_COST) & (~lethal_mask)
-        # Regular inflation: not neutral, not lethal, not temporary avoidance
-        inflated_mask = (~neutral_mask) & (~lethal_mask) & (~temp_avoid_mask)
 
         viz_data[neutral_mask] = 0
-        viz_data[lethal_mask] = 100
-        viz_data[temp_avoid_mask] = 99 # Make temp zones highly visible
+        viz_data[static_lethal_mask] = 100
+        viz_data[temp_core_mask] = 99 # Temp lethal core visualization
         
-        min_display_cost = self.cost_neutral + 1
-        # Scale regular inflation up to a value just below temp_avoid_mask's visualization value
-        max_display_cost_regular_inflation = min(self.cost_inflated_max, 98) 
+        # Visualize temporary inflation (e.g., scale from 70-98)
+        if np.any(temp_inflated_mask):
+            costs = self.planning_costmap[temp_inflated_mask]
+            min_c, max_c = float(np.min(costs)), float(np.max(costs))
+            if max_c - min_c < 1e-3: scaled = np.full_like(costs, 85, dtype=float)
+            else: scaled = 70.0 + ((costs.astype(float) - min_c) / (max_c - min_c)) * (98.0 - 70.0)
+            viz_data[temp_inflated_mask] = np.clip(scaled, 70, 98).astype(np.int8)
 
-        if max_display_cost_regular_inflation > min_display_cost:
-            costs_to_scale = self.planning_costmap[inflated_mask]
-            costs_to_scale_clipped = np.clip(costs_to_scale, min_display_cost, max_display_cost_regular_inflation)
-            
-            # Avoid division by zero if max and min are the same after clipping
-            range_val = max_display_cost_regular_inflation - min_display_cost
-            if range_val < 1e-3 : range_val = 1e-3 # prevent div by zero
-
-            scaled_values = ((costs_to_scale_clipped.astype(float) - min_display_cost) / range_val) * (98.0 - 1.0) + 1.0
-            viz_data[inflated_mask] = np.clip(scaled_values, 1, 98).astype(np.int8)
-        else: 
-            viz_data[inflated_mask] = 50 # Default for small range
+        # Visualize static inflation (e.g., scale from 1-69)
+        if np.any(static_inflated_mask):
+            costs = self.planning_costmap[static_inflated_mask]
+            min_c, max_c = float(np.min(costs)), float(np.max(costs))
+            if max_c - min_c < 1e-3: scaled = np.full_like(costs, 35, dtype=float)
+            else: scaled = 1.0 + ((costs.astype(float) - min_c) / (max_c - min_c)) * (69.0 - 1.0)
+            viz_data[static_inflated_mask] = np.clip(scaled, 1, 69).astype(np.int8)
             
         debug_map_msg.data = viz_data.flatten().tolist()
         if not hasattr(self, 'debug_planning_costmap_pub'):
             self.debug_planning_costmap_pub = self.create_publisher(OccupancyGrid, '/planning_costmap_debug', 
-                rclpy.qos.QoSProfile(depth=1, reliability=rclpy.qos.ReliabilityPolicy.RELIABLE, durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL)) # Latch for RViz
+                rclpy.qos.QoSProfile(depth=1, reliability=rclpy.qos.ReliabilityPolicy.RELIABLE, durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL))
         self.debug_planning_costmap_pub.publish(debug_map_msg)
         self.get_logger().debug("Published debug planning_costmap.")
 
 def main(args=None):
     rclpy.init(args=args)
-    planner_node = SimpleGlobalPlanner()
+    planner_node = None
     try:
+        planner_node = SimpleGlobalPlanner()
         rclpy.spin(planner_node)
     except KeyboardInterrupt:
-        planner_node.get_logger().info("Keyboard interrupt, shutting down SimpleGlobalPlanner.")
+        if planner_node: planner_node.get_logger().info("Keyboard interrupt, shutting down.")
     except Exception as e:
-        planner_node.get_logger().error(f"Unhandled exception in SimpleGlobalPlanner: {e}", exc_info=True)
+        if planner_node: planner_node.get_logger().error(f"Unhandled exception: {e}", exc_info=True)
+        else: print(f"Unhandled exception before init: {e}")
     finally:
-        if rclpy.ok():
+        if planner_node and rclpy.ok():
             if hasattr(planner_node, 'destroy_node') and callable(planner_node.destroy_node):
                 planner_node.destroy_node()
-            rclpy.shutdown()
+        if rclpy.ok(): rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

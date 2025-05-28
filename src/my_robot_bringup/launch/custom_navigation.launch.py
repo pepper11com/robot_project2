@@ -81,15 +81,24 @@ def generate_launch_description():
             'cost_unknown_as_lethal': True,
             'cost_inflated_max': 220, # Max cost for regular inflation (must be < TEMPORARY_AVOIDANCE_COST)
             'cost_neutral': 1,
-            'cost_penalty_multiplier': 5.0, # Slightly increased penalty for non-free cells
             'enable_path_simplification': True,
             'simplification_obstacle_check_expansion_cells': 1,
             'simplification_max_allowed_cost': 50,
             
             # Temporary avoidance zone parameters for global planner
             'temp_avoidance_topic': '/temp_avoidance_points',
-            'temp_avoidance_radius_m': 0.75, # Radius around reported point to mark as costly. TUNE!
-            'temp_avoidance_point_lifetime_s': 7.0 # How long to remember an avoidance point
+            'temp_avoidance_point_lifetime_s': 7.0, # How long to remember an avoidance point
+            
+            
+            
+            'cost_penalty_multiplier': 2.0,  # <<< ADJUSTED (try 1.5 to 2.5)
+
+            # This is now the OUTER extent of temp obstacle inflation AND the hard boundary for simplification
+            'temp_avoidance_radius_m': 0.35, # <<< ADJUSTED (e.g., robot_radius + desired_clearance + inflation_width)
+                                             # Ensure TEMP_OBSTACLE_LETHAL_CORE_RADIUS_M (0.20 in code) is smaller than this.
+            # If you added ROS params for core radius and edge cost, set them here:
+            # 'temp_obstacle_lethal_core_radius_m': 0.20,
+            # 'temp_obstacle_inflation_cost_at_core_edge': 230,
         }]
     )
 
