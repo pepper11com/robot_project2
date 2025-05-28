@@ -111,14 +111,14 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'max_linear_speed': 0.014,       # TUNE
             'min_approach_linear_speed': 0.015, # TUNE
-            'max_angular_speed_align': 0.25,  # TUNE
+            'max_angular_speed_align': 0.18,  # TUNE
             'max_angular_speed_drive': 0.06, # TUNE
             'kp_linear': 0.15,               # TUNE
             'kp_angular_align': 0.8,         # TUNE
             'kp_angular_drive': 0.35,        # TUNE
             'waypoint_position_tolerance': 0.08, # TUNE
             'initial_alignment_tolerance': 0.10, # TUNE (radians)
-            'driving_keep_alignment_tolerance': 0.45, # TUNE (radians)
+            'driving_keep_alignment_tolerance': 0.35, # TUNE (radians)
             'lookahead_distance_drive': 0.5,       # Meters
             'final_orientation_tolerance': 0.25,    # TUNE (radians)
             'robot_base_frame': 'base_link',
