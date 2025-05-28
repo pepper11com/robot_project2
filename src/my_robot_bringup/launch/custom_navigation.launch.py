@@ -82,23 +82,19 @@ def generate_launch_description():
             'cost_inflated_max': 220, # Max cost for regular inflation (must be < TEMPORARY_AVOIDANCE_COST)
             'cost_neutral': 1,
             'enable_path_simplification': True,
-            'simplification_obstacle_check_expansion_cells': 1,
-            'simplification_max_allowed_cost': 50,
             
             # Temporary avoidance zone parameters for global planner
             'temp_avoidance_topic': '/temp_avoidance_points',
             'temp_avoidance_point_lifetime_s': 7.0, # How long to remember an avoidance point
             
+         
             
-            
-            'cost_penalty_multiplier': 2.0,  # <<< ADJUSTED (try 1.5 to 2.5)
-
-            # This is now the OUTER extent of temp obstacle inflation AND the hard boundary for simplification
-            'temp_avoidance_radius_m': 0.35, # <<< ADJUSTED (e.g., robot_radius + desired_clearance + inflation_width)
-                                             # Ensure TEMP_OBSTACLE_LETHAL_CORE_RADIUS_M (0.20 in code) is smaller than this.
-            # If you added ROS params for core radius and edge cost, set them here:
-            # 'temp_obstacle_lethal_core_radius_m': 0.20,
-            # 'temp_obstacle_inflation_cost_at_core_edge': 230,
+            'cost_penalty_multiplier': 1.0,  # Low value to make turn penalty more dominant
+            'simplification_max_allowed_cost': 75, # Allow simplification to cut more aggressively through static inflation
+            'temp_avoidance_radius_m': 0.40, # Outer boundary for temp obstacle inflation and simplification hard check
+            'astar_turn_penalty_cost': 3.0,  # Penalty for A* making a turn. Tune this value.
+                                             # (e.g., if move_cost is ~1.4 for diagonal, a penalty of 3 makes a turn cost ~2 extra moves)
+            'simplification_obstacle_check_expansion_cells': 0, # Makes simplification try to pass closer (optional)
         }]
     )
 
