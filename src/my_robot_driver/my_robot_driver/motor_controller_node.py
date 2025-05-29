@@ -36,7 +36,7 @@ class MotorControllerNode(Node):
         self.declare_parameter("wheel_base", 0.13)
         self.declare_parameter("wheel_radius", 0.0325)
         self.declare_parameter("max_wheel_lin_speed", 0.026)
-        self.declare_parameter("fixed_turn_pwm", 0.75)  # Increased from 0.48 to 0.65
+        self.declare_parameter("fixed_turn_pwm", 0.38)  # Increased from 0.48 to 0.65
         self.declare_parameter("fixed_forward_pwm", 0.38)  # Increased from 0.32 to 0.38
         self.declare_parameter("stationary_threshold", 0.01)
         self.declare_parameter("cmd_vel_timeout", 0.3)
@@ -86,7 +86,7 @@ class MotorControllerNode(Node):
         if turn_only and abs(w_cmd) > 0.01:
             # Scale turn power based on angular velocity, but ensure much higher minimum
             turn_scale = min(
-                abs(w_cmd) / 0.25, 1.0
+                abs(w_cmd) / 0.15, 1.0
             )  # Normalize to max expected angular vel
             actual_turn_pwm = max(
                 self.fixed_turn_pwm * turn_scale, self.fixed_turn_pwm * 0.95
