@@ -36,8 +36,9 @@ class MotorControllerNode(Node):
         self.declare_parameter("wheel_base", 0.13)
         self.declare_parameter("wheel_radius", 0.0325)
         self.declare_parameter("max_wheel_lin_speed", 0.026)
-        self.declare_parameter("fixed_turn_pwm", 0.38)  # Increased from 0.48 to 0.65
-        self.declare_parameter("fixed_forward_pwm", 0.38)  # Increased from 0.32 to 0.38
+        self.declare_parameter("fixed_turn_pwm", 0.50)  # Increased significantly from 0.40 to 0.50
+        self.declare_parameter("min_turn_pwm", 0.40)    # NEW: Minimum PWM for turns to ensure both motors move
+        self.declare_parameter("fixed_forward_pwm", 0.38)
         self.declare_parameter("stationary_threshold", 0.01)
         self.declare_parameter("cmd_vel_timeout", 0.3)
         # ------------------------------------------------------------------
@@ -48,6 +49,7 @@ class MotorControllerNode(Node):
             0.001, self.get_parameter("max_wheel_lin_speed").value
         )
         self.fixed_turn_pwm = clip(self.get_parameter("fixed_turn_pwm").value, 0.0, 1.0)
+        self.min_turn_pwm = clip(self.get_parameter("min_turn_pwm").value, 0.0, 1.0)  # NEW
         self.fixed_forward_pwm = clip(
             self.get_parameter("fixed_forward_pwm").value, 0.0, 1.0
         )
@@ -84,20 +86,30 @@ class MotorControllerNode(Node):
         pwm_r_orig = 0.0
 
         if turn_only and abs(w_cmd) > 0.01:
-            # Scale turn power based on angular velocity, but ensure much higher minimum
+            # Scale turn power based on angular velocity, but ALWAYS ensure minimum turn power
             turn_scale = min(
                 abs(w_cmd) / 0.15, 1.0
             )  # Normalize to max expected angular vel
+            
+            # Calculate the PWM value, ensuring it's never below min_turn_pwm
             actual_turn_pwm = max(
-                self.fixed_turn_pwm * turn_scale, self.fixed_turn_pwm * 0.95
-            )  # Min 90% of fixed (was 85%)
+                self.fixed_turn_pwm * turn_scale, 
+                self.min_turn_pwm  # CHANGED: Use min_turn_pwm instead of percentage
+            )
 
             if w_cmd > 0:  # Turn left (CCW)
                 pwm_l_orig = -actual_turn_pwm  # Left motor backward
-                pwm_r_orig = actual_turn_pwm  # Right motor forward
+                pwm_r_orig = actual_turn_pwm   # Right motor forward
             else:  # Turn right (CW)
-                pwm_l_orig = actual_turn_pwm  # Left motor forward
+                pwm_l_orig = actual_turn_pwm   # Left motor forward
                 pwm_r_orig = -actual_turn_pwm  # Right motor backward
+                
+            # ADDITIONAL SAFETY: Ensure both sides have sufficient power
+            if abs(pwm_l_orig) < self.min_turn_pwm:
+                pwm_l_orig = math.copysign(self.min_turn_pwm, pwm_l_orig)
+            if abs(pwm_r_orig) < self.min_turn_pwm:
+                pwm_r_orig = math.copysign(self.min_turn_pwm, pwm_r_orig)
+                
         elif not turn_only and abs(v_input) > 0.001:
             # Scale forward power based on linear velocity, but ensure minimum
             forward_scale = min(
@@ -125,7 +137,8 @@ class MotorControllerNode(Node):
 
         self.get_logger().info(
             f"CMD:lx={v_input:.3f},az={w_cmd:.3f} | turn_only={turn_only} | "
-            f"PWM_SCALED:L={pwm_l_orig:.3f},R={pwm_r_orig:.3f}"
+            f"PWM_SCALED:L={pwm_l_orig:.3f},R={pwm_r_orig:.3f} | "
+            f"SENT_TO_DRIVETRAIN:L={pwm_for_drivetrain_left_arg:.3f},R={pwm_for_drivetrain_right_arg:.3f}"
         )
 
         self.drivetrain.set_speeds(

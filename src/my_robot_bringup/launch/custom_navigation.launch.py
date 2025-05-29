@@ -99,7 +99,7 @@ def generate_launch_description():
                 "enable_path_simplification": True,
                 # Temporary avoidance zone parameters for global planner
                 "temp_avoidance_topic": "/temp_avoidance_points",
-                "temp_avoidance_point_lifetime_s": 30.0,  # How long to remember an avoidance point
+                "temp_avoidance_point_lifetime_s": 5.0,  # How long to remember an avoidance point
                 "astar_turn_penalty_cost": 7.0,  # INCREASED SIGNIFICANTLY
                 "simplification_obstacle_check_expansion_cells": 1,  # Ensure it's 1 for safety brush
                 "inflation_radius_m": 0.45,  # INCREASED (for static obstacles)
@@ -123,9 +123,9 @@ def generate_launch_description():
                 "use_sim_time": use_sim_time,
                 "max_linear_speed": 0.013,
                 "min_approach_linear_speed": 0.011,
-                "max_angular_speed_align": 0.08,
-                "max_angular_speed_drive": 0.08,
-                "min_active_angular_speed": 0.07,
+                "max_angular_speed_align": 0.09,
+                "max_angular_speed_drive": 0.09,
+                "min_active_angular_speed": 0.09,
                 "kp_linear": 0.15,
                 "kp_angular_align": 0.65,
                 "kp_angular_drive": 0.35,
