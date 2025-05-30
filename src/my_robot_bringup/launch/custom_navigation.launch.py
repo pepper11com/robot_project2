@@ -74,6 +74,8 @@ def generate_launch_description():
                 # Example: 0.2m robot radius + 0.15m clearance = 0.35m.
                 "max_inflation_cost": 90,  # Max cost for an inflated cell (0-99, must be < 100).
                 "cost_scaling_factor": 10.0,  # How sharply cost drops. Higher = faster drop. TUNE!
+                
+                "no_go_zones_topic": "/no_go_zones/costmap", # Add this
             }
         ],
     )
@@ -108,11 +110,38 @@ def generate_launch_description():
                 "simplification_max_allowed_cost": 50,  # DECREASED (LOS respects more static inflation)
                 "simplification_temp_obstacle_clearance_radius_m": 0.35,  # INCREASED (LOS hard boundary for temp)
                 "simplification_min_angle_change_deg": 5.0,  # Keep for final polish
+                # No-go zone parameters
+                "no_go_zones_topic": "/no_go_zones/costmap",
             }
         ],
     )
 
-    # --- 4. Tank Waypoint Navigator Node (blimp_goto_node) ---
+    # --- 4. No-Go Zone Manager Node ---
+    # This definition looks mostly good from your example.
+    # Make sure executable name is correct.
+    no_go_zone_manager_node = Node(
+        package=pkg_custom_nav.split("/")[-1], # Or just "my_robot_driver"
+        executable="no_go_zone_manager", # Script name: no_go_zone_manager.py -> executable: no_go_zone_manager
+        name="no_go_zone_manager",
+        output="screen",
+        parameters=[
+            {
+                "use_sim_time": use_sim_time,
+                "map_topic": "/map", # Usually from SLAM
+                "clicked_point_topic": "/clicked_point", # RViz default "Publish Point" topic
+                "no_go_costmap_topic": "/no_go_zones/costmap", # Output for planners
+                "visualization_topic": "/no_go_zones/markers", # For RViz visualization
+                "global_frame": "map", # IMPORTANT: Should match the frame_id of your main /map
+                "zone_radius_m": 0.5,
+                "zone_cost_value": 100, # 0-100 for OccupancyGrid, 100 is lethal
+                "zones_config_file": os.path.join(os.path.expanduser("~"), "no_go_zones.json"), # Path to save/load
+                "auto_load_zones": True,
+                "clear_zones_topic": "/no_go_zones/clear", # Topic to clear all zones
+            }
+        ],
+    )
+
+    # --- 5. Tank Waypoint Navigator Node (blimp_goto_node) ---
     tank_navigator_node = Node(
         package=pkg_custom_nav.split("/")[-1],
         executable="blimp_goto_node",
@@ -160,7 +189,7 @@ def generate_launch_description():
         ],
     )
 
-    # --- 5. RViz Node ---
+    # --- 6. RViz Node ---
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
@@ -187,13 +216,20 @@ def generate_launch_description():
                 "use_rviz", default_value="true", description="Whether to start RViz"
             ),
             LogInfo(msg="Starting RTAB-Map SLAM components..."),
-            slam_launch,
-            LogInfo(msg="Starting Local Costmap Node... (delay 5s)"),
-            TimerAction(period=5.0, actions=[local_costmap_node]),
+            slam_launch, # SLAM should provide /map and TF tree (map->rtabmap_odom->base_link)
+
+            LogInfo(msg="Starting No-Go Zone Manager... (delay 4.0s after SLAM theoretically starts)"),
+            TimerAction(period=4.0, actions=[no_go_zone_manager_node]), # Needs /map
+
+            LogInfo(msg="Starting Local Costmap Node... (delay 5.0s)"),
+            TimerAction(period=5.0, actions=[local_costmap_node]), # Needs TF, /scan, and /no_go_zones/costmap
+
             LogInfo(msg="Starting Simple Global Planner Node... (delay 5.5s)"),
-            TimerAction(period=5.5, actions=[simple_global_planner_node]),
+            TimerAction(period=5.5, actions=[simple_global_planner_node]), # Needs /map and /no_go_zones/costmap
+        
             LogInfo(msg="Starting Tank Waypoint Navigator... (delay 6s)"),
             TimerAction(period=6.0, actions=[tank_navigator_node]),
+
             LogInfo(msg="Starting RViz... (delay 7s)"),
             TimerAction(period=7.0, actions=[rviz_node]),
         ]

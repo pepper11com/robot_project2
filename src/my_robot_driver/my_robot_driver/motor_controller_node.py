@@ -29,7 +29,7 @@ class MotorControllerNode(Node):
     def __init__(self):
         super().__init__("motor_controller_node")
         self.get_logger().info(
-            "Motor controller starting (4WD – stationary turning – ROBOT FLIPPED 180 DEG)…"
+            "Motor controller starting"
         )
 
         # ---------- tunable parameters ------------------------------------
@@ -37,7 +37,7 @@ class MotorControllerNode(Node):
         self.declare_parameter("wheel_radius", 0.0325)
         self.declare_parameter("max_wheel_lin_speed", 0.026)
         self.declare_parameter("fixed_turn_pwm", 0.50)  # Increased significantly from 0.40 to 0.50
-        self.declare_parameter("min_turn_pwm", 0.40)    # NEW: Minimum PWM for turns to ensure both motors move
+        self.declare_parameter("min_turn_pwm", 0.45)    # NEW: Minimum PWM for turns to ensure both motors move
         self.declare_parameter("fixed_forward_pwm", 0.38)
         self.declare_parameter("stationary_threshold", 0.01)
         self.declare_parameter("cmd_vel_timeout", 0.3)

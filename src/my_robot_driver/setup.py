@@ -34,6 +34,7 @@ setup(
             'rviz_path_collector_node = my_robot_driver.rviz_path_collector:main',
             'local_costmap_node = my_robot_driver.local_costmap_node:main',
             'simple_global_planner_node = my_robot_driver.simple_global_planner_node:main',
+            'no_go_zone_manager = my_robot_driver.no_go_zone_manager:main',
         ],
     },
 )

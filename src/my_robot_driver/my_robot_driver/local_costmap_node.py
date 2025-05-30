@@ -11,12 +11,11 @@ import tf2_ros
 from tf2_ros import Buffer, TransformListener
 import numpy as np
 import math
-import tf2_geometry_msgs
+import tf2_geometry_msgs # For PointStamped transformations
 import collections
 
 COST_LETHAL_PY = 100
 COST_NEUTRAL_PY = 0
-
 
 class LocalCostmapNode(Node):
     def __init__(self):
@@ -26,7 +25,7 @@ class LocalCostmapNode(Node):
         self.declare_parameter("height_meters", 3.0)
         self.declare_parameter("resolution", 0.05)
         self.declare_parameter("robot_base_frame", "base_link")
-        self.declare_parameter("global_frame_for_costmap", "rtabmap_odom")
+        self.declare_parameter("global_frame_for_costmap", "rtabmap_odom") # Local costmap's fixed frame
         self.declare_parameter("lidar_topic", "/scan")
         self.declare_parameter("costmap_publish_topic", "/local_costmap/costmap")
         self.declare_parameter("costmap_update_frequency", 5.0)
@@ -35,39 +34,31 @@ class LocalCostmapNode(Node):
         self.declare_parameter("max_inflation_cost", 99)
         self.declare_parameter("cost_scaling_factor", 10.0)
         self.declare_parameter("obstacle_cost_value", COST_LETHAL_PY)
+        self.declare_parameter("no_go_zones_topic", "/no_go_zones/costmap")
 
         self.width_m = self.get_parameter("width_meters").value
         self.height_m = self.get_parameter("height_meters").value
         self.resolution = self.get_parameter("resolution").value
         self.robot_base_frame = self.get_parameter("robot_base_frame").value
-        self.global_frame = self.get_parameter("global_frame_for_costmap").value
+        self.global_frame = self.get_parameter("global_frame_for_costmap").value # Local costmap's fixed frame
         self.lidar_topic_name = self.get_parameter("lidar_topic").value
         self.costmap_publish_topic = self.get_parameter("costmap_publish_topic").value
-        self.costmap_update_frequency = self.get_parameter(
-            "costmap_update_frequency"
-        ).value
+        self.costmap_update_frequency = self.get_parameter("costmap_update_frequency").value
         self.transform_timeout_sec = self.get_parameter("transform_timeout_sec").value
         self.inflation_radius_m = self.get_parameter("inflation_radius_m").value
-        self.max_inflation_cost_val = np.int8(
-            self.get_parameter("max_inflation_cost").value
-        )
+        self.max_inflation_cost_val = np.int8(self.get_parameter("max_inflation_cost").value)
         self.cost_scaling_factor = self.get_parameter("cost_scaling_factor").value
-        self.sensor_obstacle_cost = np.int8(
-            self.get_parameter("obstacle_cost_value").value
-        )
+        self.sensor_obstacle_cost = np.int8(self.get_parameter("obstacle_cost_value").value)
+        self.no_go_zones_topic_name = self.get_parameter("no_go_zones_topic").value
 
         self.COST_LETHAL_NP = np.int8(COST_LETHAL_PY)
         self.COST_NEUTRAL_NP = np.int8(COST_NEUTRAL_PY)
 
         if self.sensor_obstacle_cost != self.COST_LETHAL_NP:
-            self.get_logger().warn(
-                f"Parameter 'obstacle_cost_value' is not COST_LETHAL. Using {self.COST_LETHAL_NP}."
-            )
+            self.get_logger().warn(f"Parameter 'obstacle_cost_value' is not COST_LETHAL. Using {self.COST_LETHAL_NP}.")
             self.sensor_obstacle_cost = self.COST_LETHAL_NP
         if self.max_inflation_cost_val >= self.COST_LETHAL_NP:
-            self.get_logger().warn(
-                f"Parameter 'max_inflation_cost' is >= COST_LETHAL. Clamping."
-            )
+            self.get_logger().warn(f"Parameter 'max_inflation_cost' is >= COST_LETHAL. Clamping.")
             self.max_inflation_cost_val = np.int8(self.COST_LETHAL_NP - 1)
 
         self.width_cells = int(self.width_m / self.resolution)
@@ -77,27 +68,53 @@ class LocalCostmapNode(Node):
             (self.height_cells, self.width_cells), self.COST_NEUTRAL_NP, dtype=np.int8
         )
 
-        self.tf_buffer = Buffer()  # Default cache duration 10s, usually fine.
+        self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.costmap_pub = self.create_publisher(
-            OccupancyGrid, self.costmap_publish_topic, 10
-        )
+        self.costmap_pub = self.create_publisher(OccupancyGrid, self.costmap_publish_topic, 10)
         self.scan_sub = self.create_subscription(
-            LaserScan,
-            self.lidar_topic_name,
-            self.scan_callback,
-            rclpy.qos.qos_profile_sensor_data,
+            LaserScan, self.lidar_topic_name, self.scan_callback, rclpy.qos.qos_profile_sensor_data
         )
         self.latest_scan: LaserScan | None = None
-        self.timer = self.create_timer(
-            1.0 / self.costmap_update_frequency, self.update_and_publish_costmap
+        
+        self.no_go_map_global: OccupancyGrid | None = None 
+        self.no_go_map_global_data: np.ndarray | None = None 
+
+        costmap_qos = rclpy.qos.QoSProfile(
+            depth=1,
+            reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+            durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        self.no_go_sub = self.create_subscription(
+            OccupancyGrid,
+            self.no_go_zones_topic_name,
+            self._no_go_map_callback,
+            costmap_qos
+        )
+        
+        self.timer = self.create_timer(1.0 / self.costmap_update_frequency, self.update_and_publish_costmap)
         self.get_logger().info(
-            f"LocalCostmapNode initialized. Costmap frame_id: '{self.global_frame}'."
+            f"LocalCostmapNode initialized. Costmap frame_id: '{self.global_frame}'. "
+            f"Subscribing to no-go zones on: {self.no_go_zones_topic_name}."
         )
 
     def scan_callback(self, msg: LaserScan):
         self.latest_scan = msg
+
+    def _no_go_map_callback(self, msg: OccupancyGrid):
+        self.get_logger().info(
+            f"LocalCostmap received no-go map from '{msg.header.frame_id}' "
+            f"({msg.info.width}x{msg.info.height}, res: {msg.info.resolution:.3f})."
+        )
+        self.no_go_map_global = msg
+        try:
+            self.no_go_map_global_data = np.array(msg.data, dtype=np.int8).reshape(
+                (msg.info.height, msg.info.width)
+            )
+        except ValueError as e:
+            self.get_logger().error(f"Error reshaping no-go map data: {e}. "
+                                   f"Expected {msg.info.height*msg.info.width} elements, got {len(msg.data)}.")
+            self.no_go_map_global = None
+            self.no_go_map_global_data = None
 
     def _compute_cost(self, distance_cells: int) -> np.int8:
         if distance_cells == 0:
@@ -151,7 +168,6 @@ class LocalCostmapNode(Node):
             return
 
         # Use rclpyTime() with no arguments to request the "latest available" transform.
-        # This is generally more robust to minor timing discrepancies.
         time_for_lookup = rclpyTime()
 
         try:
@@ -169,7 +185,7 @@ class LocalCostmapNode(Node):
             transform_lidar_to_global = self.tf_buffer.lookup_transform(
                 self.global_frame,
                 self.latest_scan.header.frame_id,
-                time_for_lookup,  # <<< USE LATEST AVAILABLE TRANSFORM
+                time_for_lookup,  # Use latest available transform
                 timeout=rclpyDuration(seconds=self.transform_timeout_sec),
             )
 
@@ -179,21 +195,41 @@ class LocalCostmapNode(Node):
             )
             return
 
-        costmap_origin_x_in_global_frame = robot_x_in_global_frame - (
-            self.width_m / 2.0
-        )
-        costmap_origin_y_in_global_frame = robot_y_in_global_frame - (
-            self.height_m / 2.0
-        )
+        # Origin of the local costmap window, in self.global_frame
+        costmap_origin_x_in_global_frame = robot_x_in_global_frame - (self.width_m / 2.0)
+        costmap_origin_y_in_global_frame = robot_y_in_global_frame - (self.height_m / 2.0)
 
-        current_sensor_obstacle_layer = np.full(
+        # This layer will hold direct obstacle markings (lethal) before inflation.
+        current_obstacle_source_layer = np.full(
             (self.height_cells, self.width_cells), self.COST_NEUTRAL_NP, dtype=np.int8
         )
 
+        # 1. Apply No-Go Zones (simplified - only if frames match)
+        if (self.no_go_map_global is not None and self.no_go_map_global_data is not None and
+            self.global_frame == self.no_go_map_global.header.frame_id):
+            
+            no_go_map_info = self.no_go_map_global.info
+            
+            for r_lc_cell in range(self.height_cells):
+                for c_lc_cell in range(self.width_cells):
+                    # Center of the current local costmap cell, in self.global_frame
+                    pt_x_in_global = costmap_origin_x_in_global_frame + (c_lc_cell + 0.5) * self.resolution
+                    pt_y_in_global = costmap_origin_y_in_global_frame + (r_lc_cell + 0.5) * self.resolution
+                    
+                    # Convert to no-go map cell coordinates
+                    nogo_cell_c = int((pt_x_in_global - no_go_map_info.origin.position.x) / no_go_map_info.resolution)
+                    nogo_cell_r = int((pt_y_in_global - no_go_map_info.origin.position.y) / no_go_map_info.resolution)
+
+                    if (0 <= nogo_cell_c < no_go_map_info.width and
+                        0 <= nogo_cell_r < no_go_map_info.height):
+                        
+                        cost_in_nogo_map = self.no_go_map_global_data[nogo_cell_r, nogo_cell_c]
+                        if cost_in_nogo_map >= np.int8(95):  # If no_go map cell is considered lethal
+                            current_obstacle_source_layer[r_lc_cell, c_lc_cell] = self.sensor_obstacle_cost
+        
+        # 2. Apply Lidar sensor data
         for i, range_val in enumerate(self.latest_scan.ranges):
-            if not (
-                self.latest_scan.range_min <= range_val <= self.latest_scan.range_max
-            ):
+            if not (self.latest_scan.range_min <= range_val <= self.latest_scan.range_max):
                 continue
             angle = self.latest_scan.angle_min + i * self.latest_scan.angle_increment
 
@@ -216,32 +252,23 @@ class LocalCostmapNode(Node):
                 )
                 continue
 
+            # Convert point from self.global_frame to local costmap cell coordinates
             cell_x = int(
-                (
-                    p_transformed_to_global_frame.point.x
-                    - costmap_origin_x_in_global_frame
-                )
-                / self.resolution
+                (p_transformed_to_global_frame.point.x - costmap_origin_x_in_global_frame) / self.resolution
             )
             cell_y = int(
-                (
-                    p_transformed_to_global_frame.point.y
-                    - costmap_origin_y_in_global_frame
-                )
-                / self.resolution
+                (p_transformed_to_global_frame.point.y - costmap_origin_y_in_global_frame) / self.resolution
             )
 
             if 0 <= cell_x < self.width_cells and 0 <= cell_y < self.height_cells:
-                current_sensor_obstacle_layer[cell_y, cell_x] = (
-                    self.sensor_obstacle_cost
-                )
+                current_obstacle_source_layer[cell_y, cell_x] = self.sensor_obstacle_cost
+        
+        # 3. Inflate the combined layer of obstacles
+        self.final_costmap_data = self._inflate_obstacles(current_obstacle_source_layer)
 
-        self.final_costmap_data = self._inflate_obstacles(current_sensor_obstacle_layer)
-
+        # 4. Publish the final costmap
         grid_msg = OccupancyGrid()
-        grid_msg.header.stamp = (
-            self.get_clock().now().to_msg()
-        )  # Costmap published with current time
+        grid_msg.header.stamp = self.get_clock().now().to_msg()
         grid_msg.header.frame_id = self.global_frame
         grid_msg.info.resolution = self.resolution
         grid_msg.info.width = self.width_cells
@@ -262,22 +289,14 @@ def main(args=None):
         node = LocalCostmapNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
-        if node:
-            node.get_logger().info("LocalCostmapNode shutting down due to Ctrl-C.")
+        if node: node.get_logger().info("LocalCostmapNode shutting down due to Ctrl-C.")
     except Exception as e:
-        if node:
-            node.get_logger().error(
-                f"Unhandled exception in LocalCostmapNode: {e}", exc_info=True
-            )
-        else:
-            print(f"Unhandled exception before LocalCostmapNode init: {e}")
+        if node: node.get_logger().error(f"Unhandled exception in LocalCostmapNode: {e}", exc_info=True)
+        else: print(f"Unhandled exception before LocalCostmapNode init: {e}")
     finally:
         if node and rclpy.ok():
-            if hasattr(node, "destroy_node") and callable(node.destroy_node):
-                node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
-
+            if hasattr(node, "destroy_node") and callable(node.destroy_node): node.destroy_node()
+        if rclpy.ok(): rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
