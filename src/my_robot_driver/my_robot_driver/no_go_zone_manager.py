@@ -13,6 +13,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from tf2_ros import Buffer, TransformListener
 import tf2_geometry_msgs # For PointStamped transformations
 
+
+# ros2 topic pub --once /no_go_zones/complete_polygon std_msgs/msg/Empty {}
+
 DEFAULT_ZONE_COST = 100 # Standard OccupancyGrid lethal cost (0-100)
 
 class NoGoZoneManager(Node):
@@ -24,22 +27,26 @@ class NoGoZoneManager(Node):
         self.declare_parameter('no_go_costmap_topic', '/no_go_zones/costmap')
         self.declare_parameter('visualization_topic', '/no_go_zones/markers')
         self.declare_parameter('global_frame', 'map') # Frame for no-go zones & output costmap
-        self.declare_parameter('zone_radius_m', 0.5)
         self.declare_parameter('zone_cost_value', DEFAULT_ZONE_COST)
         self.declare_parameter('zones_config_file', os.path.expanduser('~/no_go_zones.json'))
         self.declare_parameter('auto_load_zones', True)
         self.declare_parameter('clear_zones_topic', '/no_go_zones/clear')
+        self.declare_parameter('complete_polygon_topic', '/no_go_zones/complete_polygon')
+        self.declare_parameter('min_polygon_points', 3)
+        self.declare_parameter('double_click_timeout_s', 1.0)
 
         self.map_topic_name = self.get_parameter('map_topic').value
         self.clicked_point_topic_name = self.get_parameter('clicked_point_topic').value
         self.no_go_costmap_topic_name = self.get_parameter('no_go_costmap_topic').value
         self.visualization_topic_name = self.get_parameter('visualization_topic').value
         self.global_frame_id = self.get_parameter('global_frame').value
-        self.zone_radius_m = self.get_parameter('zone_radius_m').value
         self.zone_cost_value = np.int8(self.get_parameter('zone_cost_value').value)
         self.zones_config_file_path = self.get_parameter('zones_config_file').value
         self.auto_load_zones_on_startup = self.get_parameter('auto_load_zones').value
         self.clear_zones_topic_name = self.get_parameter('clear_zones_topic').value
+        self.complete_polygon_topic_name = self.get_parameter('complete_polygon_topic').value
+        self.min_polygon_points = self.get_parameter('min_polygon_points').value
+        self.double_click_timeout_s = self.get_parameter('double_click_timeout_s').value
 
         if not (0 <= self.zone_cost_value <= 100):
             self.get_logger().warn(
@@ -48,7 +55,14 @@ class NoGoZoneManager(Node):
             self.zone_cost_value = np.int8(DEFAULT_ZONE_COST)
 
         self.map_metadata: MapMetaData | None = None
-        self.no_go_zone_centers_world: list[tuple[float, float]] = [] # Stores (x,y) in self.global_frame_id
+        # Change from single points to list of polygons
+        # Each polygon is a list of (x, y) points in self.global_frame_id
+        self.no_go_polygons: list[list[tuple[float, float]]] = []
+        
+        # State for building current polygon
+        self.current_polygon_points: list[tuple[float, float]] = []
+        self.last_click_time = None
+        self.is_building_polygon = False
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -62,21 +76,26 @@ class NoGoZoneManager(Node):
         self.clear_zones_sub = self.create_subscription(
             Empty, self.clear_zones_topic_name, self.clear_zones_callback, 10
         )
+        self.complete_polygon_sub = self.create_subscription(
+            Empty, self.complete_polygon_topic_name, self.complete_polygon_callback, 10
+        )
 
         costmap_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.costmap_pub = self.create_publisher(OccupancyGrid, self.no_go_costmap_topic_name, costmap_qos)
-        self.marker_pub = self.create_publisher(MarkerArray, self.visualization_topic_name, costmap_qos) # Also use durable for markers
+        self.marker_pub = self.create_publisher(MarkerArray, self.visualization_topic_name, costmap_qos)
 
         if self.auto_load_zones_on_startup:
             self.load_zones_from_file()
 
         self.get_logger().info(
-            f"NoGoZoneManager initialized. Waiting for map on '{self.map_topic_name}'. "
-            f"Outputting no-go costmap to '{self.no_go_costmap_topic_name}' in '{self.global_frame_id}' frame."
+            f"NoGoZoneManager (Polygon Mode) initialized. Waiting for map on '{self.map_topic_name}'."
         )
-        self.get_logger().info(f"Click points on '{self.clicked_point_topic_name}' to add zones (radius: {self.zone_radius_m}m).")
-        self.get_logger().info(f"To clear zones, publish to '{self.clear_zones_topic_name}'. "
-                               f"Example: ros2 topic pub --once {self.clear_zones_topic_name} std_msgs/msg/Empty {{}}")
+        self.get_logger().info(
+            f"Click points on '{self.clicked_point_topic_name}' to build polygons. "
+            f"Double-click or publish to '{self.complete_polygon_topic_name}' to complete polygon."
+        )
+        self.get_logger().info(f"To clear all zones: ros2 topic pub --once {self.clear_zones_topic_name} std_msgs/msg/Empty {{}}")
+        self.get_logger().info(f"To complete current polygon: ros2 topic pub --once {self.complete_polygon_topic_name} std_msgs/msg/Empty {{}}")
 
     def map_callback(self, msg: OccupancyGrid):
         if msg.header.frame_id != self.global_frame_id:
@@ -84,9 +103,6 @@ class NoGoZoneManager(Node):
                 f"Map frame '{msg.header.frame_id}' does not match expected global_frame '{self.global_frame_id}'. "
                 "No-go zones may be incorrect. Please ensure `global_frame` parameter matches the map's frame_id."
             )
-            # Optionally, you could try to use msg.header.frame_id as the target if it's the first map message.
-            # For now, we stick to the configured global_frame_id.
-            # return # Or allow processing if TF can handle it.
         
         if self.map_metadata is None or \
            self.map_metadata.resolution != msg.info.resolution or \
@@ -96,8 +112,7 @@ class NoGoZoneManager(Node):
                 f"Map received/updated: {msg.info.width}x{msg.info.height}, res: {msg.info.resolution:.3f} m/cell, "
                 f"frame: '{msg.header.frame_id}'"
             )
-        self.map_metadata = msg.info # msg.info is MapMetaData
-        # Important: Store the frame_id from the map message as that's what map_metadata refers to
+        self.map_metadata = msg.info
         self.map_actual_frame_id = msg.header.frame_id 
         self.update_and_publish_all()
 
@@ -109,40 +124,103 @@ class NoGoZoneManager(Node):
         point_to_add = msg.point
         source_frame = msg.header.frame_id
 
+        # Transform point to global frame if needed
         if source_frame != self.global_frame_id:
-            self.get_logger().info(f"Clicked point is in frame '{source_frame}', attempting to transform to '{self.global_frame_id}'.")
             try:
-                # Ensure the point has a valid timestamp for transformation
                 if msg.header.stamp.sec == 0 and msg.header.stamp.nanosec == 0:
                     point_time = self.get_clock().now()
-                    self.get_logger().warn(f"Clicked point has zero timestamp, using current time for transform: {point_time.nanoseconds / 1e9:.3f}s")
                 else:
                     point_time = rclpy.time.Time.from_msg(msg.header.stamp)
 
                 transform = self.tf_buffer.lookup_transform(
-                    self.global_frame_id, # Target frame
-                    source_frame,         # Source frame
-                    point_time,           # Time of the point
+                    self.global_frame_id,
+                    source_frame,
+                    point_time,
                     rclpy.duration.Duration(seconds=1.0) 
                 )
                 transformed_point_stamped = tf2_geometry_msgs.do_transform_point(msg, transform)
                 point_to_add = transformed_point_stamped.point
-                self.get_logger().info(f"Transformed point to: ({point_to_add.x:.2f}, {point_to_add.y:.2f}) in '{self.global_frame_id}'.")
             except Exception as e:
                 self.get_logger().error(f"Failed to transform clicked point from '{source_frame}' to '{self.global_frame_id}': {e}")
                 return
         
-        new_zone_center = (point_to_add.x, point_to_add.y)
-        self.no_go_zone_centers_world.append(new_zone_center)
-        self.get_logger().info(f"Added no-go zone at: ({new_zone_center[0]:.2f}, {new_zone_center[1]:.2f}) with radius {self.zone_radius_m:.2f}m.")
+        new_point = (point_to_add.x, point_to_add.y)
+        current_time = self.get_clock().now()
+        
+        # Check for double-click to complete polygon
+        is_double_click = False
+        if (self.last_click_time is not None and 
+            (current_time - self.last_click_time).nanoseconds / 1e9 < self.double_click_timeout_s and
+            len(self.current_polygon_points) >= self.min_polygon_points):
+            is_double_click = True
+        
+        self.last_click_time = current_time
+        
+        if is_double_click:
+            self.complete_current_polygon()
+        else:
+            # Add point to current polygon
+            self.current_polygon_points.append(new_point)
+            self.is_building_polygon = True
+            self.get_logger().info(
+                f"Added point {len(self.current_polygon_points)}: ({new_point[0]:.2f}, {new_point[1]:.2f}). "
+                f"Need {max(0, self.min_polygon_points - len(self.current_polygon_points))} more points minimum."
+            )
+            if len(self.current_polygon_points) >= self.min_polygon_points:
+                self.get_logger().info("Double-click or publish to complete_polygon_topic to finish this polygon.")
+        
+        self.update_and_publish_all()
+
+    def complete_polygon_callback(self, msg: Empty):
+        self.complete_current_polygon()
+
+    def complete_current_polygon(self):
+        if len(self.current_polygon_points) < self.min_polygon_points:
+            self.get_logger().warn(f"Cannot complete polygon: need at least {self.min_polygon_points} points, have {len(self.current_polygon_points)}.")
+            return
+        
+        # Add completed polygon to list
+        self.no_go_polygons.append(self.current_polygon_points.copy())
+        self.get_logger().info(f"Completed polygon with {len(self.current_polygon_points)} points. Total polygons: {len(self.no_go_polygons)}")
+        
+        # Reset for next polygon
+        self.current_polygon_points = []
+        self.is_building_polygon = False
+        self.last_click_time = None
+        
         self.save_zones_to_file()
         self.update_and_publish_all()
         
     def clear_zones_callback(self, msg: Empty):
-        self.get_logger().info("Clearing all no-go zones.")
-        self.no_go_zone_centers_world = []
-        self.save_zones_to_file() # Save empty list
+        self.get_logger().info("Clearing all no-go zones and current polygon.")
+        self.no_go_polygons = []
+        self.current_polygon_points = []
+        self.is_building_polygon = False
+        self.last_click_time = None
+        self.save_zones_to_file()
         self.update_and_publish_all()
+
+    def _point_in_polygon(self, x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
+        """Ray casting algorithm to check if point is inside polygon."""
+        if len(polygon) < 3:
+            return False
+        
+        n = len(polygon)
+        inside = False
+        
+        p1x, p1y = polygon[0]
+        for i in range(1, n + 1):
+            p2x, p2y = polygon[i % n]
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        
+        return inside
 
     def update_and_publish_all(self):
         if self.map_metadata is None:
@@ -152,13 +230,11 @@ class NoGoZoneManager(Node):
 
     def publish_no_go_costmap(self):
         if self.map_metadata is None:
-            self.get_logger().debug("Map metadata not available, cannot publish no-go costmap.")
             return
 
         grid_msg = OccupancyGrid()
         grid_msg.header.stamp = self.get_clock().now().to_msg()
-        # The costmap MUST be in the same frame and have the same geometry as the map it's based on.
-        grid_msg.header.frame_id = self.map_actual_frame_id # Frame of the received /map
+        grid_msg.header.frame_id = self.map_actual_frame_id
         grid_msg.info = self.map_metadata 
 
         costmap_data = np.full((self.map_metadata.height, self.map_metadata.width), 0, dtype=np.int8)
@@ -166,92 +242,200 @@ class NoGoZoneManager(Node):
         if self.map_metadata.resolution == 0:
             self.get_logger().error("Map resolution is zero, cannot create no-go costmap.")
             return
-            
-        radius_cells = self.zone_radius_m / self.map_metadata.resolution
 
-        for zx_world, zy_world in self.no_go_zone_centers_world:
-            # Zone center is in self.global_frame_id. Map data is in self.map_actual_frame_id.
-            # If they are different, we need to transform zone center to map_actual_frame_id.
-            zx_map_frame, zy_map_frame = zx_world, zy_world
-            if self.global_frame_id != self.map_actual_frame_id:
-                try:
-                    # Create a PointStamped for the zone center in its native global_frame_id
-                    zone_center_pt_global = PointStamped()
-                    zone_center_pt_global.header.frame_id = self.global_frame_id
-                    zone_center_pt_global.header.stamp = self.get_clock().now().to_msg() # Use current time for transform
-                    zone_center_pt_global.point.x = zx_world
-                    zone_center_pt_global.point.y = zy_world
-                    
-                    transform_to_map_frame = self.tf_buffer.lookup_transform(
-                        self.map_actual_frame_id, # Target
-                        self.global_frame_id,     # Source
-                        rclpy.time.Time(),        # Latest available
-                        rclpy.duration.Duration(seconds=0.2)
-                    )
-                    transformed_pt = tf2_geometry_msgs.do_transform_point(zone_center_pt_global, transform_to_map_frame)
-                    zx_map_frame, zy_map_frame = transformed_pt.point.x, transformed_pt.point.y
-                except Exception as e:
-                    self.get_logger().warn(f"Failed to transform no-go zone center from '{self.global_frame_id}' to map frame '{self.map_actual_frame_id}': {e}. Skipping this zone for costmap.")
-                    continue
-            
-            map_ox, map_oy = self.map_metadata.origin.position.x, self.map_metadata.origin.position.y
-            center_c = int((zx_map_frame - map_ox) / self.map_metadata.resolution)
-            center_r = int((zy_map_frame - map_oy) / self.map_metadata.resolution)
-
-            min_r = max(0, center_r - int(np.ceil(radius_cells)))
-            max_r = min(self.map_metadata.height -1 , center_r + int(np.ceil(radius_cells)))
-            min_c = max(0, center_c - int(np.ceil(radius_cells)))
-            max_c = min(self.map_metadata.width -1, center_c + int(np.ceil(radius_cells)))
-
-            for r_idx in range(min_r, max_r + 1):
-                for c_idx in range(min_c, max_c + 1):
-                    dist_sq_cells = (r_idx - center_r)**2 + (c_idx - center_c)**2
-                    if dist_sq_cells <= radius_cells**2:
-                        costmap_data[r_idx, c_idx] = self.zone_cost_value
+        # Process completed polygons
+        for polygon in self.no_go_polygons:
+            self._rasterize_polygon(polygon, costmap_data)
         
         grid_msg.data = costmap_data.ravel().tolist()
         self.costmap_pub.publish(grid_msg)
 
+    def _rasterize_polygon(self, polygon_world: list[tuple[float, float]], costmap_data: np.ndarray):
+        """Fill polygon area in costmap with zone cost."""
+        if len(polygon_world) < 3:
+            return
+        
+        # Transform polygon to map frame if needed
+        polygon_map_frame = []
+        for px_world, py_world in polygon_world:
+            px_map, py_map = px_world, py_world
+            if self.global_frame_id != self.map_actual_frame_id:
+                try:
+                    point_global = PointStamped()
+                    point_global.header.frame_id = self.global_frame_id
+                    point_global.header.stamp = self.get_clock().now().to_msg()
+                    point_global.point.x = px_world
+                    point_global.point.y = py_world
+                    
+                    transform = self.tf_buffer.lookup_transform(
+                        self.map_actual_frame_id,
+                        self.global_frame_id,
+                        rclpy.time.Time(),
+                        rclpy.duration.Duration(seconds=0.2)
+                    )
+                    transformed_pt = tf2_geometry_msgs.do_transform_point(point_global, transform)
+                    px_map, py_map = transformed_pt.point.x, transformed_pt.point.y
+                except Exception as e:
+                    self.get_logger().warn(f"Failed to transform polygon point: {e}")
+                    continue
+            polygon_map_frame.append((px_map, py_map))
+        
+        if len(polygon_map_frame) < 3:
+            return
+        
+        # Find bounding box in cell coordinates
+        min_x = min(p[0] for p in polygon_map_frame)
+        max_x = max(p[0] for p in polygon_map_frame)
+        min_y = min(p[1] for p in polygon_map_frame)
+        max_y = max(p[1] for p in polygon_map_frame)
+        
+        map_ox, map_oy = self.map_metadata.origin.position.x, self.map_metadata.origin.position.y
+        
+        min_c = max(0, int((min_x - map_ox) / self.map_metadata.resolution))
+        max_c = min(self.map_metadata.width - 1, int((max_x - map_ox) / self.map_metadata.resolution))
+        min_r = max(0, int((min_y - map_oy) / self.map_metadata.resolution))
+        max_r = min(self.map_metadata.height - 1, int((max_y - map_oy) / self.map_metadata.resolution))
+        
+        # Check each cell in bounding box
+        for r in range(min_r, max_r + 1):
+            for c in range(min_c, max_c + 1):
+                # Convert cell center to world coordinates
+                world_x = map_ox + (c + 0.5) * self.map_metadata.resolution
+                world_y = map_oy + (r + 0.5) * self.map_metadata.resolution
+                
+                if self._point_in_polygon(world_x, world_y, polygon_map_frame):
+                    costmap_data[r, c] = self.zone_cost_value
+
     def publish_markers(self):
         if not hasattr(self, 'map_actual_frame_id') or self.map_actual_frame_id is None:
-             # self.get_logger().debug("Map actual frame ID not set, cannot publish markers.")
              return
 
         marker_array = MarkerArray()
-        # DELETEALL marker to clear previous ones
+        
+        # Delete all previous markers
         delete_marker = Marker()
-        delete_marker.header.frame_id = self.global_frame_id # Markers are in the frame zones were defined
+        delete_marker.header.frame_id = self.global_frame_id
         delete_marker.header.stamp = self.get_clock().now().to_msg()
-        delete_marker.ns = "no_go_zones_viz"
+        delete_marker.ns = "no_go_polygons"
         delete_marker.id = 0 
         delete_marker.action = Marker.DELETEALL
         marker_array.markers.append(delete_marker)
-        self.marker_pub.publish(marker_array) # Publish deleteall first
+        self.marker_pub.publish(marker_array)
 
-        # Add new markers
-        marker_array.markers.clear() # Clear for new markers
-        for i, (zx, zy) in enumerate(self.no_go_zone_centers_world):
-            marker = Marker()
-            marker.header.frame_id = self.global_frame_id # Frame where zones are defined
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "no_go_zones_viz"
-            marker.id = i + 1 # Unique ID for each zone
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
-
-            marker.pose.position.x = zx
-            marker.pose.position.y = zy
-            marker.pose.position.z = 0.01 # Slightly above ground for visibility
-            marker.pose.orientation.w = 1.0
-
-            marker.scale.x = self.zone_radius_m * 2.0
-            marker.scale.y = self.zone_radius_m * 2.0
-            marker.scale.z = 0.02 # Small height
-
-            marker.color.r = 1.0; marker.color.g = 0.0; marker.color.b = 0.0; marker.color.a = 0.4;
-
-            marker.lifetime = rclpy.duration.Duration(seconds=0).to_msg() # Persist indefinitely
-            marker_array.markers.append(marker)
+        marker_array.markers.clear()
+        marker_id = 1
+        
+        # Visualize completed polygons
+        for i, polygon in enumerate(self.no_go_polygons):
+            if len(polygon) >= 3:
+                # Polygon area (filled)
+                area_marker = Marker()
+                area_marker.header.frame_id = self.global_frame_id
+                area_marker.header.stamp = self.get_clock().now().to_msg()
+                area_marker.ns = "no_go_polygons"
+                area_marker.id = marker_id
+                marker_id += 1
+                area_marker.type = Marker.TRIANGLE_LIST
+                area_marker.action = Marker.ADD
+                area_marker.pose.orientation.w = 1.0
+                area_marker.scale.x = 1.0
+                area_marker.scale.y = 1.0
+                area_marker.scale.z = 1.0
+                area_marker.color.r = 1.0
+                area_marker.color.g = 0.0
+                area_marker.color.b = 0.0
+                area_marker.color.a = 0.3
+                
+                # Simple triangulation for convex polygons
+                for j in range(1, len(polygon) - 1):
+                    # Triangle: polygon[0], polygon[j], polygon[j+1]
+                    for k in [0, j, j+1]:
+                        pt = Point()
+                        pt.x = polygon[k][0]
+                        pt.y = polygon[k][1]
+                        pt.z = 0.01
+                        area_marker.points.append(pt)
+                
+                marker_array.markers.append(area_marker)
+                
+                # Polygon outline
+                outline_marker = Marker()
+                outline_marker.header.frame_id = self.global_frame_id
+                outline_marker.header.stamp = self.get_clock().now().to_msg()
+                outline_marker.ns = "no_go_polygons"
+                outline_marker.id = marker_id
+                marker_id += 1
+                outline_marker.type = Marker.LINE_STRIP
+                outline_marker.action = Marker.ADD
+                outline_marker.pose.orientation.w = 1.0
+                outline_marker.scale.x = 0.05
+                outline_marker.color.r = 0.8
+                outline_marker.color.g = 0.0
+                outline_marker.color.b = 0.0
+                outline_marker.color.a = 1.0
+                
+                for px, py in polygon:
+                    pt = Point()
+                    pt.x = px
+                    pt.y = py
+                    pt.z = 0.02
+                    outline_marker.points.append(pt)
+                
+                # Close the polygon
+                pt = Point()
+                pt.x = polygon[0][0]
+                pt.y = polygon[0][1]
+                pt.z = 0.02
+                outline_marker.points.append(pt)
+                
+                marker_array.markers.append(outline_marker)
+        
+        # Visualize current polygon being built
+        if self.current_polygon_points:
+            current_marker = Marker()
+            current_marker.header.frame_id = self.global_frame_id
+            current_marker.header.stamp = self.get_clock().now().to_msg()
+            current_marker.ns = "no_go_polygons"
+            current_marker.id = marker_id
+            current_marker.type = Marker.LINE_STRIP
+            current_marker.action = Marker.ADD
+            current_marker.pose.orientation.w = 1.0
+            current_marker.scale.x = 0.03
+            current_marker.color.r = 0.0
+            current_marker.color.g = 1.0
+            current_marker.color.b = 0.0
+            current_marker.color.a = 1.0
+            
+            for px, py in self.current_polygon_points:
+                pt = Point()
+                pt.x = px
+                pt.y = py
+                pt.z = 0.03
+                current_marker.points.append(pt)
+            
+            marker_array.markers.append(current_marker)
+            
+            # Show individual points of current polygon
+            for j, (px, py) in enumerate(self.current_polygon_points):
+                point_marker = Marker()
+                point_marker.header.frame_id = self.global_frame_id
+                point_marker.header.stamp = self.get_clock().now().to_msg()
+                point_marker.ns = "no_go_polygons"
+                point_marker.id = marker_id + j + 1
+                point_marker.type = Marker.SPHERE
+                point_marker.action = Marker.ADD
+                point_marker.pose.position.x = px
+                point_marker.pose.position.y = py
+                point_marker.pose.position.z = 0.05
+                point_marker.pose.orientation.w = 1.0
+                point_marker.scale.x = 0.1
+                point_marker.scale.y = 0.1
+                point_marker.scale.z = 0.1
+                point_marker.color.r = 0.0
+                point_marker.color.g = 1.0
+                point_marker.color.b = 1.0
+                point_marker.color.a = 1.0
+                marker_array.markers.append(point_marker)
         
         if marker_array.markers:
             self.marker_pub.publish(marker_array)
@@ -260,22 +444,37 @@ class NoGoZoneManager(Node):
         try:
             if os.path.exists(self.zones_config_file_path):
                 with open(self.zones_config_file_path, 'r') as f:
-                    loaded_zones = json.load(f)
-                    # Ensure it's a list of tuples/lists with 2 elements
-                    self.no_go_zone_centers_world = [
-                        (float(zone[0]), float(zone[1])) for zone in loaded_zones if isinstance(zone, (list, tuple)) and len(zone) == 2
-                    ]
-                self.get_logger().info(f"Loaded {len(self.no_go_zone_centers_world)} no-go zones from {self.zones_config_file_path}.")
+                    loaded_data = json.load(f)
+                    # Handle both old format (list of points) and new format (list of polygons)
+                    if loaded_data and isinstance(loaded_data[0], (list, tuple)):
+                        if len(loaded_data[0]) == 2 and isinstance(loaded_data[0][0], (int, float)):
+                            # Old format: list of [x, y] points, convert to single polygon
+                            self.get_logger().info("Converting old point-based zones to single polygon.")
+                            if len(loaded_data) >= self.min_polygon_points:
+                                self.no_go_polygons = [[(float(pt[0]), float(pt[1])) for pt in loaded_data]]
+                            else:
+                                self.no_go_polygons = []
+                        else:
+                            # New format: list of polygons
+                            self.no_go_polygons = []
+                            for polygon_data in loaded_data:
+                                if isinstance(polygon_data, list) and len(polygon_data) >= self.min_polygon_points:
+                                    polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_data if isinstance(pt, (list, tuple)) and len(pt) == 2]
+                                    if len(polygon) >= self.min_polygon_points:
+                                        self.no_go_polygons.append(polygon)
+                    else:
+                        self.no_go_polygons = []
+                self.get_logger().info(f"Loaded {len(self.no_go_polygons)} no-go polygons from {self.zones_config_file_path}.")
             else:
-                self.get_logger().info(f"No-go zone config file '{self.zones_config_file_path}' not found. Starting with an empty list.")
+                self.get_logger().info(f"No-go zone config file '{self.zones_config_file_path}' not found. Starting with empty list.")
         except Exception as e:
             self.get_logger().error(f"Error loading no-go zones from file '{self.zones_config_file_path}': {e}")
 
     def save_zones_to_file(self):
         try:
             with open(self.zones_config_file_path, 'w') as f:
-                json.dump(self.no_go_zone_centers_world, f, indent=2)
-            self.get_logger().info(f"Saved {len(self.no_go_zone_centers_world)} no-go zones to {self.zones_config_file_path}.")
+                json.dump(self.no_go_polygons, f, indent=2)
+            self.get_logger().info(f"Saved {len(self.no_go_polygons)} no-go polygons to {self.zones_config_file_path}.")
         except Exception as e:
             self.get_logger().error(f"Error saving no-go zones to file '{self.zones_config_file_path}': {e}")
 

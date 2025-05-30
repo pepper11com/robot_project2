@@ -132,11 +132,13 @@ def generate_launch_description():
                 "no_go_costmap_topic": "/no_go_zones/costmap", # Output for planners
                 "visualization_topic": "/no_go_zones/markers", # For RViz visualization
                 "global_frame": "map", # IMPORTANT: Should match the frame_id of your main /map
-                "zone_radius_m": 0.5,
                 "zone_cost_value": 100, # 0-100 for OccupancyGrid, 100 is lethal
                 "zones_config_file": os.path.join(os.path.expanduser("~"), "no_go_zones.json"), # Path to save/load
                 "auto_load_zones": True,
                 "clear_zones_topic": "/no_go_zones/clear", # Topic to clear all zones
+                "complete_polygon_topic": "/no_go_zones/complete_polygon", # Add this
+                "min_polygon_points": 3, # Add this
+                "double_click_timeout_s": 1.0, # Add this
             }
         ],
     )
