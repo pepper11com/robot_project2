@@ -13,8 +13,12 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from tf2_ros import Buffer, TransformListener
 import tf2_geometry_msgs # For PointStamped transformations
 
-
+# # To clear all zones:
+# ros2 topic pub --once /no_go_zones/clear std_msgs/msg/Empty {}
+# # To complete current polygon:
 # ros2 topic pub --once /no_go_zones/complete_polygon std_msgs/msg/Empty {}
+# # To delete last zone:
+# ros2 topic pub --once /no_go_zones/delete_last std_msgs/msg/Empty {}
 
 DEFAULT_ZONE_COST = 100 # Standard OccupancyGrid lethal cost (0-100)
 
@@ -34,6 +38,7 @@ class NoGoZoneManager(Node):
         self.declare_parameter('complete_polygon_topic', '/no_go_zones/complete_polygon')
         self.declare_parameter('min_polygon_points', 3)
         self.declare_parameter('double_click_timeout_s', 1.0)
+        self.declare_parameter('delete_last_zone_topic', '/no_go_zones/delete_last')
 
         self.map_topic_name = self.get_parameter('map_topic').value
         self.clicked_point_topic_name = self.get_parameter('clicked_point_topic').value
@@ -47,6 +52,7 @@ class NoGoZoneManager(Node):
         self.complete_polygon_topic_name = self.get_parameter('complete_polygon_topic').value
         self.min_polygon_points = self.get_parameter('min_polygon_points').value
         self.double_click_timeout_s = self.get_parameter('double_click_timeout_s').value
+        self.delete_last_zone_topic_name = self.get_parameter('delete_last_zone_topic').value
 
         if not (0 <= self.zone_cost_value <= 100):
             self.get_logger().warn(
@@ -79,6 +85,9 @@ class NoGoZoneManager(Node):
         self.complete_polygon_sub = self.create_subscription(
             Empty, self.complete_polygon_topic_name, self.complete_polygon_callback, 10
         )
+        self.delete_last_sub = self.create_subscription(
+            Empty, self.delete_last_zone_topic_name, self.delete_last_zone_callback, 10
+        )
 
         costmap_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.costmap_pub = self.create_publisher(OccupancyGrid, self.no_go_costmap_topic_name, costmap_qos)
@@ -96,6 +105,7 @@ class NoGoZoneManager(Node):
         )
         self.get_logger().info(f"To clear all zones: ros2 topic pub --once {self.clear_zones_topic_name} std_msgs/msg/Empty {{}}")
         self.get_logger().info(f"To complete current polygon: ros2 topic pub --once {self.complete_polygon_topic_name} std_msgs/msg/Empty {{}}")
+        self.get_logger().info(f"To delete last zone: ros2 topic pub --once {self.delete_last_zone_topic_name} std_msgs/msg/Empty {{}}")
 
     def map_callback(self, msg: OccupancyGrid):
         if msg.header.frame_id != self.global_frame_id:
@@ -198,6 +208,23 @@ class NoGoZoneManager(Node):
         self.is_building_polygon = False
         self.last_click_time = None
         self.save_zones_to_file()
+        self.update_and_publish_all()
+
+    def delete_last_zone_callback(self, msg: Empty):
+        if self.is_building_polygon and self.current_polygon_points:
+            # If currently building a polygon, cancel it
+            self.get_logger().info(f"Canceling current polygon with {len(self.current_polygon_points)} points.")
+            self.current_polygon_points = []
+            self.is_building_polygon = False
+            self.last_click_time = None
+        elif self.no_go_polygons:
+            # Delete the last completed polygon
+            deleted_polygon = self.no_go_polygons.pop()
+            self.get_logger().info(f"Deleted last polygon with {len(deleted_polygon)} points. Remaining polygons: {len(self.no_go_polygons)}")
+            self.save_zones_to_file()
+        else:
+            self.get_logger().info("No polygons to delete.")
+        
         self.update_and_publish_all()
 
     def _point_in_polygon(self, x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
