@@ -104,7 +104,7 @@ def generate_launch_description():
                 "temp_avoidance_point_lifetime_s": 5.0,  # How long to remember an avoidance point
                 "astar_turn_penalty_cost": 7.0,  # INCREASED SIGNIFICANTLY
                 "simplification_obstacle_check_expansion_cells": 1,  # Ensure it's 1 for safety brush
-                "inflation_radius_m": 0.45,  # INCREASED (for static obstacles)
+                "inflation_radius_m": 0.65,  # INCREASED (for static obstacles)
                 "cost_penalty_multiplier": 2.5,  # INCREASED (to make A* respect inflation more)
                 "temp_avoidance_radius_m": 0.60,  # INCREASED (A* outer inflation for temp)
                 "simplification_max_allowed_cost": 50,  # DECREASED (LOS respects more static inflation)
