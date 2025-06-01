@@ -204,7 +204,7 @@ class LocalCostmapNode(Node):
             (self.height_cells, self.width_cells), self.COST_NEUTRAL_NP, dtype=np.int8
         )
 
-        # 1. Apply No-Go Zones (simplified - only if frames match)
+        # 1. Apply No-Go Zones with stricter enforcement
         if (self.no_go_map_global is not None and self.no_go_map_global_data is not None and
             self.global_frame == self.no_go_map_global.header.frame_id):
             
@@ -224,9 +224,10 @@ class LocalCostmapNode(Node):
                         0 <= nogo_cell_r < no_go_map_info.height):
                         
                         cost_in_nogo_map = self.no_go_map_global_data[nogo_cell_r, nogo_cell_c]
-                        if cost_in_nogo_map >= np.int8(95):  # If no_go map cell is considered lethal
+                        # Use lower threshold for stricter enforcement
+                        if cost_in_nogo_map >= np.int8(85):  # More restrictive threshold
                             current_obstacle_source_layer[r_lc_cell, c_lc_cell] = self.sensor_obstacle_cost
-        
+
         # 2. Apply Lidar sensor data
         for i, range_val in enumerate(self.latest_scan.ranges):
             if not (self.latest_scan.range_min <= range_val <= self.latest_scan.range_max):

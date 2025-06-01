@@ -32,6 +32,7 @@ class NoGoZoneManager(Node):
         self.declare_parameter('visualization_topic', '/no_go_zones/markers')
         self.declare_parameter('global_frame', 'map') # Frame for no-go zones & output costmap
         self.declare_parameter('zone_cost_value', DEFAULT_ZONE_COST)
+        self.declare_parameter('zone_inflation_radius_m', 0.2)  # Add inflation around zones
         self.declare_parameter('zones_config_file', os.path.expanduser('~/no_go_zones.json'))
         self.declare_parameter('auto_load_zones', True)
         self.declare_parameter('clear_zones_topic', '/no_go_zones/clear')
@@ -46,6 +47,7 @@ class NoGoZoneManager(Node):
         self.visualization_topic_name = self.get_parameter('visualization_topic').value
         self.global_frame_id = self.get_parameter('global_frame').value
         self.zone_cost_value = np.int8(self.get_parameter('zone_cost_value').value)
+        self.zone_inflation_radius_m = self.get_parameter('zone_inflation_radius_m').value
         self.zones_config_file_path = self.get_parameter('zones_config_file').value
         self.auto_load_zones_on_startup = self.get_parameter('auto_load_zones').value
         self.clear_zones_topic_name = self.get_parameter('clear_zones_topic').value
@@ -54,11 +56,10 @@ class NoGoZoneManager(Node):
         self.double_click_timeout_s = self.get_parameter('double_click_timeout_s').value
         self.delete_last_zone_topic_name = self.get_parameter('delete_last_zone_topic').value
 
-        if not (0 <= self.zone_cost_value <= 100):
-            self.get_logger().warn(
-                f"zone_cost_value ({self.zone_cost_value}) is outside OccupancyGrid range [0, 100]. Clamping to {DEFAULT_ZONE_COST}."
-            )
-            self.zone_cost_value = np.int8(DEFAULT_ZONE_COST)
+        # Force zone cost to be lethal
+        if self.zone_cost_value < 100:
+            self.get_logger().warn(f"zone_cost_value ({self.zone_cost_value}) < 100. Setting to 100 for truly impassable zones.")
+            self.zone_cost_value = np.int8(100)
 
         self.map_metadata: MapMetaData | None = None
         # Change from single points to list of polygons
@@ -278,7 +279,7 @@ class NoGoZoneManager(Node):
         self.costmap_pub.publish(grid_msg)
 
     def _rasterize_polygon(self, polygon_world: list[tuple[float, float]], costmap_data: np.ndarray):
-        """Fill polygon area in costmap with zone cost."""
+        """Fill polygon area in costmap with zone cost and add inflation."""
         if len(polygon_world) < 3:
             return
         
@@ -310,11 +311,14 @@ class NoGoZoneManager(Node):
         if len(polygon_map_frame) < 3:
             return
         
-        # Find bounding box in cell coordinates
-        min_x = min(p[0] for p in polygon_map_frame)
-        max_x = max(p[0] for p in polygon_map_frame)
-        min_y = min(p[1] for p in polygon_map_frame)
-        max_y = max(p[1] for p in polygon_map_frame)
+        # Calculate inflation radius in cells
+        inflation_cells = int(self.zone_inflation_radius_m / self.map_metadata.resolution) if self.map_metadata.resolution > 0 else 0
+        
+        # Find bounding box in cell coordinates (expanded for inflation)
+        min_x = min(p[0] for p in polygon_map_frame) - self.zone_inflation_radius_m
+        max_x = max(p[0] for p in polygon_map_frame) + self.zone_inflation_radius_m
+        min_y = min(p[1] for p in polygon_map_frame) - self.zone_inflation_radius_m
+        max_y = max(p[1] for p in polygon_map_frame) + self.zone_inflation_radius_m
         
         map_ox, map_oy = self.map_metadata.origin.position.x, self.map_metadata.origin.position.y
         
@@ -323,7 +327,7 @@ class NoGoZoneManager(Node):
         min_r = max(0, int((min_y - map_oy) / self.map_metadata.resolution))
         max_r = min(self.map_metadata.height - 1, int((max_y - map_oy) / self.map_metadata.resolution))
         
-        # Check each cell in bounding box
+        # Check each cell in expanded bounding box
         for r in range(min_r, max_r + 1):
             for c in range(min_c, max_c + 1):
                 # Convert cell center to world coordinates
@@ -331,7 +335,54 @@ class NoGoZoneManager(Node):
                 world_y = map_oy + (r + 0.5) * self.map_metadata.resolution
                 
                 if self._point_in_polygon(world_x, world_y, polygon_map_frame):
+                    # Inside polygon - mark as lethal
                     costmap_data[r, c] = self.zone_cost_value
+                elif inflation_cells > 0:
+                    # Check if within inflation distance of polygon
+                    min_dist = self._min_distance_to_polygon(world_x, world_y, polygon_map_frame)
+                    if min_dist <= self.zone_inflation_radius_m:
+                        # Apply inflation cost (high but not lethal)
+                        inflation_cost = max(95, int(100 - (min_dist / self.zone_inflation_radius_m) * 5))
+                        costmap_data[r, c] = max(costmap_data[r, c], inflation_cost)
+
+    def _min_distance_to_polygon(self, px: float, py: float, polygon: list[tuple[float, float]]) -> float:
+        """Calculate minimum distance from point to polygon edges."""
+        min_dist = float('inf')
+        
+        for i in range(len(polygon)):
+            p1 = polygon[i]
+            p2 = polygon[(i + 1) % len(polygon)]
+            
+            dist = self._point_to_line_distance(px, py, p1[0], p1[1], p2[0], p2[1])
+            min_dist = min(min_dist, dist)
+        
+        return min_dist
+
+    def _point_to_line_distance(self, px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+        """Calculate distance from point to line segment."""
+        # Vector from line start to point
+        dx = px - x1
+        dy = py - y1
+        
+        # Vector of line segment
+        lx = x2 - x1
+        ly = y2 - y1
+        
+        # Length squared of line segment
+        len_sq = lx * lx + ly * ly
+        
+        if len_sq < 1e-10:  # Line is a point
+            return math.sqrt(dx * dx + dy * dy)
+        
+        # Project point onto line
+        t = max(0, min(1, (dx * lx + dy * ly) / len_sq))
+        
+        # Closest point on line segment
+        closest_x = x1 + t * lx
+        closest_y = y1 + t * ly
+        
+        # Distance to closest point
+        return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
 
     def publish_markers(self):
         if not hasattr(self, 'map_actual_frame_id') or self.map_actual_frame_id is None:

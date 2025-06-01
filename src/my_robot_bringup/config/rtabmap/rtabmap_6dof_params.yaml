@@ -1,0 +1,64 @@
+# RTAB-Map parameters for 6DoF SLAM with a blimp using a 2D LiDAR
+# (converted to PointCloud2 for each scan)
+
+rtabmap:
+  ros__parameters:
+    # General
+    frame_id: "base_link"               # Blimp's base frame
+    map_frame_id: "map"                 # Global map frame
+    odom_frame_id: "odom"               # Odometry frame (from icp_odometry)
+    publish_tf: true                    # Publish map -> odom TF
+    use_sim_time: false                 # Set to true if using simulation time
+
+    # Input Data
+    subscribe_depth: false
+    subscribe_rgb: false
+    subscribe_stereo: false
+    subscribe_scan: false               # Not using raw 2D LaserScan directly in rtabmap node
+    subscribe_scan_cloud: true          # ***** USING PointCloud2 (from LaserScanToPointCloudNode) *****
+    subscribe_user_data: false
+    subscribe_odom_info: false          # If your odom node doesn't publish /odom_info
+
+    # For scan_cloud input
+    scan_cloud_max_points: 0            # 0 means no limit
+    scan_cloud_known_covariance: false
+
+    # Critical for 6DoF
+    Reg/Force3DoF: "false"                # ***** MUST BE FALSE FOR 6DoF *****
+
+    # Registration Strategy (for loop closure and graph optimization)
+    Reg/Strategy: "1"                   # 0=Visual, 1=ICP
+    Icp/VoxelSize: "0.05"               # Adjust to cloud density and environment scale
+    Icp/PointToPlane: "true"
+    Icp/PointToPlaneK: "20"
+    Icp/MaxCorrespondenceDistance: "0.3" # CRITICAL: Adjust based on point cloud density, expected motion,
+                                         # and how much the blimp might tilt between scans.
+                                         # Start larger, then reduce if possible.
+    Icp/MaxIterations: "30"
+    Icp/Epsilon: "0.001"
+    Icp/CorrespondenceRatio: "0.05"      # Lower might be needed if overlap is poor due to tilting.
+
+    # Loop Closure Detection
+    Rtabmap/LoopThr: "0.15"
+    Rtabmap/DetectionRate: "1.0"         # Process 1 Hz for loop closure detection
+    # Proximity Detection based on geometry
+    RGBD/ProximityBySpace: "true"
+    RGBD/ProximityMaxGraphDepth: "0"
+    RGBD/ProximityPathMaxNeighbors: "5"
+    RGBD/LocalRadius: "2.0"
+    RGBD/OptimizeMaxError: "0.5"
+
+    # Graph Optimization
+    Optimizer/Strategy: "1"             # 0=TORO, 1=g2o, 2=GTSAM
+    Optimizer/Robust: "true"
+
+    # Map Generation
+    Grid/CellSize: "0.05"
+    Grid/RangeMax: "0.0"                # 0 uses LiDAR's max range
+    Grid/RayTracing: "true"
+    Grid/FlatObstacleDetected: "true"
+    Grid/MinClusterSize: "10"           # Minimum points to form a cluster in the map cloud
+
+    # Memory Management
+    Mem/IncrementalMemory: "true"
+    Mem/STMSize: "30"

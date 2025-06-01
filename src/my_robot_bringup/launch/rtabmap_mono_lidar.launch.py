@@ -44,7 +44,7 @@ def generate_launch_description():
             'serial_port': '/dev/ttyUSB0',
             'frame_id': 'lidar_link',
             'angle_compensate': 'true',
-            'scan_mode': 'Standard', # Or 'DenseBoost' if your C1 supports and environment needs it
+            'scan_mode': 'Standard',
             'use_sim_time': use_sim_time
         }.items()
     )

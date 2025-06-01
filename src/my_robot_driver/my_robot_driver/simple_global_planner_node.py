@@ -144,6 +144,10 @@ class SimpleGlobalPlanner(Node):
         self.no_go_zones_full_msg = msg # Store full message
         try:
             self.no_go_costmap_data = np.array(msg.data, dtype=np.uint8).reshape((msg.info.height, msg.info.width))
+            # Log statistics about no-go zones
+            lethal_cells = np.sum(self.no_go_costmap_data >= 100)
+            high_cost_cells = np.sum((self.no_go_costmap_data >= 95) & (self.no_go_costmap_data < 100))
+            self.get_logger().info(f"No-go map: {lethal_cells} lethal cells, {high_cost_cells} high-cost cells")
         except ValueError as e:
             self.get_logger().error(f"Error reshaping no-go costmap data on validated message: {e}")
             self.no_go_zones_full_msg = None
@@ -175,7 +179,7 @@ class SimpleGlobalPlanner(Node):
         self.planning_costmap = np.copy(self.base_costmap)
         num_no_go_applied = 0
 
-        # 1. Apply No-Go Zones
+        # 1. Apply No-Go Zones with stricter thresholds
         if self.no_go_costmap_data is not None and self.no_go_zones_full_msg is not None and self.map_data is not None:
             # Validate geometry and frame ID before applying
             no_go_info = self.no_go_zones_full_msg.info
@@ -184,14 +188,15 @@ class SimpleGlobalPlanner(Node):
                 no_go_info.height == self.map_info.height and
                 abs(no_go_info.origin.position.x - self.map_info.origin.position.x) < 1e-4 and
                 abs(no_go_info.origin.position.y - self.map_info.origin.position.y) < 1e-4 and
-                self.no_go_zones_full_msg.header.frame_id == self.map_data.header.frame_id): # CORRECTED CHECK
+                self.no_go_zones_full_msg.header.frame_id == self.map_data.header.frame_id):
 
-                NO_GO_THRESHOLD_FROM_MSG = np.uint8(95)
+                # Use lower threshold for stricter no-go enforcement
+                NO_GO_THRESHOLD_FROM_MSG = np.uint8(90)  # Lower threshold means more restrictive
                 no_go_mask = self.no_go_costmap_data >= NO_GO_THRESHOLD_FROM_MSG
                 self.planning_costmap[no_go_mask] = LETHAL_OBSTACLE_COST_INTERNAL
                 num_no_go_applied = np.sum(no_go_mask)
                 if num_no_go_applied > 0:
-                    self.get_logger().info(f"Applied {num_no_go_applied} no-go zone cells to planning costmap.")
+                    self.get_logger().info(f"Applied {num_no_go_applied} no-go zone cells to planning costmap (threshold: {NO_GO_THRESHOLD_FROM_MSG}).")
             else:
                 self.get_logger().warn(
                     "Mismatch between current map_info/frame and stored no_go_map_info/frame during _apply_temporary_avoidances. "
